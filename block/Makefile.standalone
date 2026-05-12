@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Standalone out-of-tree build for flow-iosched.ko
+#
+# Usage:
+#   make -C /lib/modules/$(uname -r)/build M=$(pwd)
+#   sudo insmod flow-iosched.ko
+
+obj-m += flow-iosched.o

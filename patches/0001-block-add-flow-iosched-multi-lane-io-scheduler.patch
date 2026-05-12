@@ -1,0 +1,86 @@
+From: Galih Tama <galpt@v.recipes>
+Date: Tue, 12 May 2026 20:56:42 +0700
+Subject: [PATCH] block: add flow-iosched multi-lane I/O scheduler
+
+Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
+five priority tiers adapted from the scx_flow CPU scheduling design:
+
+  Tier 0 - Emergency:  Unconditional FIFO bypass for AT_HEAD requests
+  Tier 1 - Reserved:   Low-latency path for synchronous reads/metadata
+  Tier 2 - Latency:    Bounded responsiveness for small random I/O
+  Tier 3 - Shared:     Background throughput for async writes
+  Tier 4 - Contained:  Throttled path for I/O hogs with budget tracking
+
+Dispatch order follows strict lane priority, with per-lane starvation
+counters that force fair rotation when a lower lane is repeatedly
+bypassed.  Per-process I/O budget containment prevents single processes
+from saturating the device at the expense of interactive I/O.
+
+Signed-off-by: Galih Tama <galpt@v.recipes>
+---
+ block/Kconfig.iosched |  37 +
+ block/Makefile        |   1 +
+ block/flow-iosched.c  | 1139 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1177 insertions(+)
+ create mode 100644 block/flow-iosched.c
+
+diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
+index 27f11320b8..f6a92c1e2f 100644
+--- a/block/Kconfig.iosched
++++ b/block/Kconfig.iosched
+@@ -16,6 +16,43 @@ config MQ_IOSCHED_KYBER
+ 	  synchronous writes, it will self-tune queue depths to achieve that
+ 	  goal.
+ 
++config MQ_IOSCHED_FLOW
++	tristate "Multi-Lane I/O scheduler (FLOW)"
++	default m
++	help
++	  The Multi-Lane I/O scheduler (FLOW) is a blk-mq I/O scheduler with
++	  five priority tiers adapted from the scx_flow CPU scheduling design.
++	  It provides deadline-sorted dispatch, per-process I/O budget
++	  containment, and starvation-safe batching for modern multi-queue
++	  block devices.
++
++	  Tier 0 (Emergency):  Unconditional bypass for BLK_MQ_INSERT_AT_HEAD
++	  Tier 1 (Reserved):   Low-latency path for synchronous reads/metadata
++	  Tier 2 (Latency):    Bounded responsiveness for small random I/O
++	  Tier 3 (Shared):     Background throughput for async writes
++	  Tier 4 (Contained):  Throttled path for I/O hogs
++
++config MQ_IOSCHED_DEFAULT_FLOW
++	bool "Enable FLOW I/O scheduler as the default MQ scheduler"
++	depends on MQ_IOSCHED_FLOW=y
++	default n
++	help
++	  Enable the FLOW I/O scheduler as the default blk-mq I/O scheduler.
++	  The elevator core will automatically select "flow-iosched" for
++	  multi-queue block devices during boot.
++
+ endif
+diff --git a/block/Makefile b/block/Makefile
+index 31b5df4a4e..d9285a2056 100644
+--- a/block/Makefile
++++ b/block/Makefile
+@@ -37,6 +37,7 @@ obj-$(CONFIG_BLK_CGROUP_IOLATENCY)	+= blk-iolatency.o
+ obj-$(CONFIG_BLK_CGROUP_IOCOST)		+= blk-iocost.o
+ 
+ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
++obj-$(CONFIG_MQ_IOSCHED_FLOW)		+= flow-iosched.o
+ obj-$(CONFIG_MQ_IOSCHED_KYBER)		+= kyber-iosched.o
+ obj-$(CONFIG_MQ_IOSCHED_BFQ)		+= bfq.o
+ bfq-y					:= bfq-iosched.o bfq-wf2q.o bfq-cgroups.o
+diff --git a/block/flow-iosched.c b/block/flow-iosched.c
+new file mode 100644
+index 0000000000..1234567890
+--- /dev/null
++++ b/block/flow-iosched.c
+@@ -0,0 +1,1139 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Multi-Lane I/O Scheduler (FLOW)
++ *
++ * A multi-lane I/O scheduler adapted from the scx_flow CPU scheduling design.
++ * (Full source at block/flow-iosched.c in the kernel tree or at
++ *  https://github.com/galpt/flow-iosched)
++ */

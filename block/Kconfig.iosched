@@ -1,0 +1,24 @@
+config MQ_IOSCHED_FLOW
+	tristate "Multi-Lane I/O scheduler (FLOW)"
+	default m
+	help
+	  The Multi-Lane I/O scheduler (FLOW) is a blk-mq I/O scheduler with
+	  five priority tiers adapted from the scx_flow CPU scheduling design.
+	  It provides deadline-sorted dispatch, per-process I/O budget
+	  containment, and starvation-safe batching for modern multi-queue
+	  block devices.
+
+	  Tier 0 (Emergency):  Unconditional bypass for BLK_MQ_INSERT_AT_HEAD
+	  Tier 1 (Reserved):   Low-latency path for synchronous reads/metadata
+	  Tier 2 (Latency):    Bounded responsiveness for small random I/O
+	  Tier 3 (Shared):     Background throughput for async writes
+	  Tier 4 (Contained):  Throttled path for I/O hogs
+
+config MQ_IOSCHED_DEFAULT_FLOW
+	bool "Enable FLOW I/O scheduler as the default MQ scheduler"
+	depends on MQ_IOSCHED_FLOW=y
+	default n
+	help
+	  Enable the FLOW I/O scheduler as the default blk-mq I/O scheduler.
+	  The elevator core will automatically select "flow-iosched" for
+	  multi-queue block devices during boot.
