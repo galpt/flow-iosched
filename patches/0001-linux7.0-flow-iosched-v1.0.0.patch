@@ -17,6 +17,10 @@ Apply to kernels running 6.18 or later (including 7.x).
 Signed-off-by: Galih Tama <galpt@v.recipes>
 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
+new file mode 100644
+index 00000000..ad5f3e7f2b
+--- /dev/null
++++ b/block/Kconfig.iosched
 @@ -0,0 +1,24 @@
 +config MQ_IOSCHED_FLOW
 +	tristate "Multi-Lane I/O scheduler (FLOW)"
@@ -44,12 +48,19 @@ diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
 +	  multi-queue block devices during boot.
 
 diff --git a/block/Makefile b/block/Makefile
+new file mode 100644
+index 00000000..d9285a2056
+--- /dev/null
++++ b/block/Makefile
 @@ -0,0 +1,2 @@
 +# SPDX-License-Identifier: GPL-2.0
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
+index 00000000..e69de29bb2
+--- /dev/null
++++ b/block/flow-iosched.c
 @@ -0,0 +1,1212 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
@@ -1261,5 +1272,5 @@ new file mode 100644
 +module_exit(flow_exit);
 +
 +MODULE_AUTHOR("flow-iosched contributors");
-+MODULE_LICENSE("GPL");
++MODULE_LICENSE("GPL v2");
 +MODULE_DESCRIPTION(FLOW_PROGNAME);

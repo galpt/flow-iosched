@@ -1208,5 +1208,5 @@ module_init(flow_init);
 module_exit(flow_exit);
 
 MODULE_AUTHOR("flow-iosched contributors");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION(FLOW_PROGNAME);
