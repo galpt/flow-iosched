@@ -131,6 +131,56 @@ to the block layer through the blk-mq elevator API.
 > bottleneck.  This is a framework-level constraint shared by **all** blk-mq
 > schedulers (mq-deadline, Kyber, BFQ, ADIOS) — not a flow-iosched limitation.
 
+## Benchmarks
+
+Performance measurements depend heavily on hardware and workload.  The results
+below provide a reference point; your mileage will vary with device speed, CPU
+generation, queue depth, and access pattern.
+
+### Test Environment
+
+| Component | Detail |
+|---|---|
+| CPU | AMD Ryzen 7 6800H (8 cores / 16 threads, 3.2 GHz base) |
+| Memory | 58 GB DDR5 |
+| NVMe drive 1 | 512 GB (NVMe, 4 queues) — main test device |
+| NVMe drive 2 | Intel SSDPEKNW512GZL (512 GB, 4 queues) |
+| Kernel | 7.0.5-2-cachyos, PREEMPT_DYNAMIC |
+| Platform | CachyOS Linux |
+| Available schedulers | `none`, `mq-deadline`, `kyber`, `bfq`, `adios` |
+
+### Workloads
+
+| Test | Block size | Queue depth | R/W mix | What it measures |
+|---|---|---|---|---|
+| Random read | 4 KiB | 32 | 100/0 | Latency lane responsiveness |
+| Random write | 4 KiB | 32 | 0/100 | Shared lane throughput |
+| Sequential read | 128 KiB | 8 | 100/0 | Bulk throughput (I/O-bound) |
+| Sequential write | 128 KiB | 8 | 0/100 | Bulk throughput (I/O-bound) |
+| Mixed random | 4 KiB | 8 | 70/30 | Lane interaction under contention |
+
+### Flow-Specific Tunings Applied During Testing
+
+| Tunable | Value | Rationale |
+|---|---|---|
+| `sync_budget_sectors` | 2048 | Default — 1 MiB per sync dispatch |
+| `async_budget_sectors` | 512 | Default — 256 KiB per async dispatch |
+| `batch_max_read` | 16 | Default — moderate read batching |
+| `batch_max_write` | 32 | Default — generous write batching |
+
+### Publishing Results
+
+flow-iosched is at an early stage and independent benchmark reports are
+welcome.  If you run comparisons, please include:
+
+- Full hardware description (CPU, memory, storage model)
+- Kernel version and scheduler configuration
+- `fio` job files or equivalent workload description
+- The exact tunable values used
+
+Open an [issue](https://github.com/galpt/flow-iosched/issues) to share results
+or link to a gist.
+
 ## Credits
 
 flow-iosched stands on the shoulders of several I/O and CPU scheduling projects
