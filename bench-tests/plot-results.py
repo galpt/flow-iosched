@@ -6,7 +6,8 @@
 # Reads results/summary.csv and produces:
 #   charts/iops.png        — IOPS comparison (grouped bar)
 #   charts/latency.png     — latency comparison (grouped bar)
-#   charts/comparison.png  — IOPS per scheduler (horizontal, one per workload)
+#   charts/per_workload.png — IOPS per scheduler (horizontal, one per workload)
+#   charts/comparison.png  — Consolidated comparison (multiple metrics)
 
 import csv
 import os
@@ -19,46 +20,91 @@ RESULTS = "results"
 CHARTS = "charts"
 os.makedirs(CHARTS, exist_ok=True)
 
-# Read data
+# ── Color palette matching scx_flow benchmark style ───────────────────
+COLOR_BY_SCHED = {
+    "none":         "#4c72b0",
+    "mq-deadline":  "#dd8452",
+    "kyber":        "#55a868",
+    "bfq":          "#c44e52",
+    "adios":        "#8172b3",
+    "flow-iosched": "#937860",
+}
+FALLBACK_COLORS = list(COLOR_BY_SCHED.values())
+
+# ── Read data ─────────────────────────────────────────────────────────
 rows = []
 with open(f"{RESULTS}/summary.csv") as f:
     reader = csv.DictReader(f)
     for row in reader:
-        row["read_iops"] = int(row["read_iops"])
-        row["write_iops"] = int(row["write_iops"])
-        row["read_lat_us"] = float(row["read_lat_us"])
-        row["write_lat_us"] = float(row["write_lat_us"])
+        try:
+            row["read_iops"]  = int(float(row["read_iops"]))
+            row["write_iops"] = int(float(row["write_iops"]))
+            row["read_lat_us"]  = float(row["read_lat_us"])
+            row["write_lat_us"] = float(row["write_lat_us"])
+        except (ValueError, KeyError):
+            continue
         rows.append(row)
 
 schedulers = sorted(set(r["scheduler"] for r in rows))
 workloads = ["randread_4k", "randwrite_4k", "seqread_128k", "seqwrite_128k", "mixed_70_30"]
 wl_labels = ["Rand Read\n4k", "Rand Write\n4k", "Seq Read\n128k", "Seq Write\n128k", "Mixed\n70/30"]
-colors = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3", "#937860"]
 
-# ---- IOPS chart ----
+def color_for(sched):
+    return COLOR_BY_SCHED.get(sched, FALLBACK_COLORS[len(schedulers) % len(FALLBACK_COLORS)])
+
+def workload_index(wl):
+    try:
+        return workloads.index(wl)
+    except ValueError:
+        return -1
+
+# ── Helpers ───────────────────────────────────────────────────────────
+def fmt_val(v):
+    """Format a number for bar annotations: int for large, 1dp for small."""
+    if v >= 1000:
+        return f"{v:,.0f}"
+    return f"{v:.1f}"
+
+def annotate_bars(ax, bars, values, pad_ratio=0.02):
+    """Annotate each bar with its value, offset slightly to the right."""
+    max_val = max(abs(v) for v in values) if values else 1
+    pad = max_val * pad_ratio if pad_ratio > 0 else 1
+    for bar, val in zip(bars, values):
+        if val == 0:
+            continue
+        ax.text(
+            bar.get_width() + pad,
+            bar.get_y() + bar.get_height() / 2,
+            fmt_val(val),
+            va="center", fontsize=6,
+        )
+
+# ── 1. IOPS chart (grouped bars, total IOPS per workload) ────────────
 fig, ax = plt.subplots(figsize=(10, 5))
 x = np.arange(len(workloads))
-width = 0.12
+width = 0.85 / max(len(schedulers), 1)
 
 for i, sched in enumerate(schedulers):
     vals = []
     for wl in workloads:
         match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
         vals.append(match[0]["read_iops"] + match[0]["write_iops"] if match else 0)
-    ax.bar(x + i * width, vals, width, label=sched, color=colors[i % len(colors)])
+    bars = ax.bar(x + i * width, vals, width, label=sched, color=color_for(sched))
+    annotate_bars(ax, bars, vals)
 
 ax.set_ylabel("Total IOPS")
-ax.set_title("I/O Scheduler Comparison — IOPS (higher is better)")
+ax.set_title("I/O Scheduler Comparison — Total IOPS (higher is better)")
 ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
 ax.set_xticklabels(wl_labels)
-ax.legend(loc="upper left", fontsize=8)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
-fig.tight_layout()
+ax.margins(x=0.15)
+fig.subplots_adjust(bottom=0.14, right=0.92)
 fig.savefig(f"{CHARTS}/iops.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/iops.png")
 
-# ---- Latency chart ----
+# ── 2. Latency chart (read latency, grouped bars) ────────────────────
 fig, ax = plt.subplots(figsize=(10, 5))
 for i, sched in enumerate(schedulers):
     vals = []
@@ -68,20 +114,22 @@ for i, sched in enumerate(schedulers):
             vals.append(match[0]["read_lat_us"])
         else:
             vals.append(0)
-    ax.bar(x + i * width, vals, width, label=sched, color=colors[i % len(colors)])
+    bars = ax.bar(x + i * width, vals, width, label=sched, color=color_for(sched))
+    annotate_bars(ax, bars, vals)
 
 ax.set_ylabel("Read latency (µs)")
 ax.set_title("I/O Scheduler Comparison — Read Latency (lower is better)")
 ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
 ax.set_xticklabels(wl_labels)
-ax.legend(loc="upper left", fontsize=8)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
-fig.tight_layout()
+ax.margins(x=0.15)
+fig.subplots_adjust(bottom=0.14, right=0.92)
 fig.savefig(f"{CHARTS}/latency.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/latency.png")
 
-# ---- Per-scheduler IOPS ----
+# ── 3. Per-workload IOPS (horizontal bars) ───────────────────────────
 fig, axes = plt.subplots(1, len(workloads), figsize=(14, 4), sharey=True)
 for wi, wl in enumerate(workloads):
     ax = axes[wi]
@@ -92,16 +140,74 @@ for wi, wl in enumerate(workloads):
         if match:
             scheds.append(sched)
             iops.append(match[0]["read_iops"] + match[0]["write_iops"])
-    bars = ax.barh(range(len(scheds)), iops, color=colors[:len(scheds)])
+    bars = ax.barh(range(len(scheds)), iops, color=[color_for(s) for s in scheds])
     ax.set_yticks(range(len(scheds)))
     ax.set_yticklabels(scheds, fontsize=7)
     ax.set_xlabel("IOPS")
     ax.set_title(wl_labels[wi].replace("\n", " "), fontsize=9)
     ax.grid(axis="x", alpha=0.3)
-fig.suptitle("Per-Workload IOPS (higher is better)", fontsize=12)
+    for bar, val in zip(bars, iops):
+        ax.text(bar.get_width() * 1.01, bar.get_y() + bar.get_height() / 2,
+                fmt_val(val), va="center", fontsize=7)
+fig.suptitle("Per-Workload IOPS — Higher is Better", fontsize=12)
 fig.tight_layout()
 fig.savefig(f"{CHARTS}/per_workload.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/per_workload.png")
 
-print(f"\nCharts saved to {CHARTS}/")
+# ── 4. Consolidated comparison chart ─────────────────────────────────
+# Follows the scx_flow pattern: one subplot per metric with direction annotation.
+# Only averages over workloads that actually exercise the metric (e.g. read
+# latency only from read workloads, write latency only from write workloads).
+metrics = [
+    ("Total IOPS",       "higher",
+     lambda m: m["read_iops"] + m["write_iops"],
+     None),  # all workloads qualify
+    ("Read Latency (µs)","lower",
+     lambda m: m["read_lat_us"],
+     lambda m: m["read_iops"] > 0),  # only workloads with reads
+    ("Write Latency (µs)","lower",
+     lambda m: m["write_lat_us"],
+     lambda m: m["write_iops"] > 0),  # only workloads with writes
+]
+fig, axes = plt.subplots(1, len(metrics), figsize=(14, 5))
+if len(metrics) == 1:
+    axes = [axes]
+
+for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
+    data_per_sched = []
+    for sched in schedulers:
+        vals = []
+        for wl in workloads:
+            match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
+            if match and (qualifies is None or qualifies(match[0])):
+                vals.append(extractor(match[0]))
+        data_per_sched.append(sum(vals) / len(vals) if vals else 0)
+
+    # Sort best to worst
+    sorted_pairs = sorted(
+        zip(schedulers, data_per_sched),
+        key=lambda pair: pair[1],
+        reverse=(direction == "higher"),
+    )
+    sorted_scheds = [p[0] for p in sorted_pairs]
+    sorted_vals   = [p[1] for p in sorted_pairs]
+
+    bars = ax.barh(range(len(sorted_scheds)), sorted_vals,
+                   color=[color_for(s) for s in sorted_scheds])
+    ax.set_yticks(range(len(sorted_scheds)))
+    ax.set_yticklabels(sorted_scheds, fontsize=8)
+    dir_label = "higher is better" if direction == "higher" else "lower is better"
+    ax.set_title(f"{title}\n({dir_label})", fontsize=10)
+    ax.set_xlim(left=0)  # ensure bars always visible
+    ax.grid(axis="x", alpha=0.3)
+    annotate_bars(ax, bars, sorted_vals, pad_ratio=0.01)
+
+fig.suptitle("I/O Scheduler Comparison — Consolidated Averages\nSorted best to worst per metric",
+             fontsize=12, fontweight="bold")
+fig.tight_layout()
+fig.savefig(f"{CHARTS}/comparison.png", dpi=150)
+plt.close(fig)
+print(f"  → {CHARTS}/comparison.png")
+
+print(f"\nAll charts saved to {CHARTS}/")
