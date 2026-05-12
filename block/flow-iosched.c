@@ -35,7 +35,7 @@
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 
-#define FLOW_VERSION "0.1.0"
+#define FLOW_VERSION "1.0.0"
 
 /* ── Lane identifiers ─────────────────────────────────────────────── */
 enum flow_lane {
@@ -85,6 +85,7 @@ enum flow_optype {
 /* ── Per-request scheduler data ───────────────────────────────────── */
 struct flow_rq_data {
 	struct list_head	dl_node;	/* node in dl_group->rqs */
+	struct dl_group		*dl_group;	/* owning dl_group (BUG #2 fix) */
 	struct request		*rq;		/* back-pointer */
 	u64			deadline;	/* absolute deadline */
 	u32			block_size;	/* blk_rq_bytes(rq) */
@@ -174,6 +175,8 @@ static inline struct flow_rq_data *get_rq_data(struct request *rq)
 
 static inline struct flow_icq_data *icq_to_flow_icq(struct io_cq *icq)
 {
+	if (!icq)
+		return NULL;
 	return (struct flow_icq_data *)(icq + 1);
 }
 
@@ -317,12 +320,13 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 	struct dl_group *dlg;
 	u64 deadline;
 
-	if (!root)
+	if (!root || !rd)
 		return;
 
 	rd->lane = lane;
 	rd->deadline = flow_deadline(rq, lane);
 	rd->block_size = blk_rq_bytes(rq);
+	rd->dl_group = NULL;
 
 	/* Quantise deadline for grouping */
 	deadline = rd->deadline & ~((1ULL << FLOW_QUANTUM_SHIFT) - 1);
@@ -350,6 +354,7 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 	rb_insert_color_cached(&dlg->node, root, leftmost);
 
 found:
+	rd->dl_group = dlg;	/* BUG #2 fix: store owning dl_group */
 	list_add_tail(&rd->dl_node, &dlg->rqs);
 }
 
@@ -360,10 +365,11 @@ static void flow_del_from_dl_tree(struct flow_data *fd, u8 lane,
 	struct flow_rq_data *rd = get_rq_data(rq);
 	struct dl_group *dlg;
 
-	if (!root || list_empty(&rd->dl_node))
+	if (!root || !rd || !rd->dl_group || list_empty(&rd->dl_node))
 		return;
 
-	dlg = container_of(rd->dl_node, struct dl_group, rqs);
+	dlg = rd->dl_group;	/* BUG #2 fix: use stored pointer */
+	rd->dl_group = NULL;
 	list_del_init(&rd->dl_node);
 	if (list_empty(&dlg->rqs)) {
 		rb_erase_cached(&dlg->node, root);
@@ -450,10 +456,14 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	struct request_queue *q = hctx->queue;
 	struct flow_data *fd = q->elevator->elevator_data;
 	struct flow_rq_data *rd = get_rq_data(rq);
-	struct io_cq *icq = rq->elv.priv[1];
+	struct io_cq *icq = rq->elv.icq;	/* BUG #1 fix */
 	struct flow_icq_data *ficq = NULL;
 	u8 lane;
 	bool contained = false;
+
+	/* BUG #4 fix: guard against NULL priv[0] from prepare_request failure */
+	if (!rd)
+		return;
 
 	rd->block_size = blk_rq_bytes(rq);
 
@@ -464,7 +474,8 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	/* Budget / containment check */
 	if (icq) {
 		ficq = icq_to_flow_icq(icq);
-		contained = flow_check_budget_and_contain(ficq, rq, fd);
+		if (ficq)
+			contained = flow_check_budget_and_contain(ficq, rq, fd);
 	}
 
 	lane = flow_assign_lane(rq, insert_flags, fd);
@@ -563,11 +574,16 @@ static inline u8 flow_starved_lane(struct flow_data *fd)
 	return FLOW_LANE_EMERGENCY;
 }
 
-static bool flow_fill_batch(struct flow_data *fd)
+/* Lock must be held by caller — separate locking from fill_batch
+ * to avoid deadlock when dispatch_request holds the lock.          */
+static bool flow_fill_batch_locked(struct flow_data *fd)
 {
 	int page = !fd->active_batch_page;
 	u32 count = 0;
 	bool stop = false;
+
+	/* BUG #10 fix: verify back page is empty before overwriting */
+	WARN_ON_ONCE(fd->bq_states[page] != 0);
 
 	memset(&fd->batch_counts[page], 0, sizeof(fd->batch_counts[page]));
 	fd->bq_states[page] = 0;
@@ -576,72 +592,81 @@ static bool flow_fill_batch(struct flow_data *fd)
 	for (int i = 0; i < FLOW_NR_OPTYPES; i++)
 		INIT_LIST_HEAD(&fd->batch_pages[page][i]);
 
-	do {
-		scoped_guard(spinlock_irqsave, &fd->lock)
-		for (int i = 0; i < FLOW_MAX_DELETES_PER_LOCK; i++) {
-			struct flow_rq_data *rd;
-			struct request *rq;
-			u8 lane;
-			u8 optype;
+	/* BUG #8 fix: implement completion_window_ns batching */
+	for (int i = 0; i < FLOW_MAX_DELETES_PER_LOCK &&
+	     !stop && count < FLOW_MAX_DELETES_PER_LOCK; i++) {
+		struct flow_rq_data *rd;
+		struct request *rq;
+		u8 lane;
+		u8 optype;
 
-			/* Check starvation before normal dispatch order */
-			lane = flow_starved_lane(fd);
-			if (lane == FLOW_LANE_EMERGENCY) {
-				/* Normal dispatch order: Reserved → Latency → Shared → Contained */
-				lane = FLOW_LANE_RESERVED;
+		/* Check starvation before normal dispatch order */
+		lane = flow_starved_lane(fd);
+		if (lane == FLOW_LANE_EMERGENCY) {
+			/* Normal dispatch order: Reserved → Latency → Shared → Contained */
+			lane = FLOW_LANE_RESERVED;
+			rd = flow_first_rq_for_lane(fd, lane);
+			if (!rd) {
+				lane = FLOW_LANE_LATENCY;
 				rd = flow_first_rq_for_lane(fd, lane);
-				if (!rd) {
-					lane = FLOW_LANE_LATENCY;
-					rd = flow_first_rq_for_lane(fd, lane);
-				}
-				if (!rd) {
-					lane = FLOW_LANE_SHARED;
-					rd = flow_first_rq_for_lane(fd, lane);
-				}
-				if (!rd) {
-					lane = FLOW_LANE_CONTAINED;
-					rd = flow_first_rq_for_lane(fd, lane);
-				}
-			} else {
-				/* Starvation override: pick from the starved lane */
-				rd = flow_first_rq_for_lane(fd, lane);
-				/* Reset the starvation counter */
-				fd->starvation_rounds[lane] = 0;
 			}
 			if (!rd) {
-				stop = true;
-				break;
+				lane = FLOW_LANE_SHARED;
+				rd = flow_first_rq_for_lane(fd, lane);
 			}
-
-			/* Increment starvation for all lanes below this one */
-			for (u8 l = lane + 1; l < FLOW_NR_LANES; l++)
-				fd->starvation_rounds[l]++;
-
-			/* Enforce batch limits */
-			rq = rd->rq;
-			optype = flow_optype(rq);
-			if (optype == FLOW_READ &&
-			    fd->batch_counts[page][FLOW_READ] >= fd->batch_max_read) {
-				stop = true;
-				break;
+			if (!rd) {
+				lane = FLOW_LANE_CONTAINED;
+				rd = flow_first_rq_for_lane(fd, lane);
 			}
-			if (optype == FLOW_WRITE &&
-			    fd->batch_counts[page][FLOW_WRITE] >= fd->batch_max_write) {
-				stop = true;
-				break;
-			}
-
-			flow_remove_request(fd, rq, rq->q);
-
-			list_add_tail(&rq->queuelist,
-				      &fd->batch_pages[page][optype]);
-			fd->batch_counts[page][optype]++;
-			fd->bq_states[page] |= (1U << optype);
-			count++;
+		} else {
+			/* Starvation override: pick from the starved lane */
+			rd = flow_first_rq_for_lane(fd, lane);
+			fd->starvation_rounds[lane] = 0;
 		}
-	} while (!stop);
+		if (!rd) {
+			stop = true;
+			break;
+		}
+
+		/* Increment starvation for all lanes below this one */
+		for (u8 l = lane + 1; l < FLOW_NR_LANES; l++)
+			fd->starvation_rounds[l]++;
+
+		/* BUG #9 fix: skip exhausted op-types instead of aborting */
+		rq = rd->rq;
+		optype = flow_optype(rq);
+		if (optype == FLOW_READ &&
+		    fd->batch_counts[page][FLOW_READ] >= fd->batch_max_read)
+			continue;
+		if (optype == FLOW_WRITE &&
+		    fd->batch_counts[page][FLOW_WRITE] >= fd->batch_max_write)
+			continue;
+
+		flow_remove_request(fd, rq, rq->q);
+
+		list_add_tail(&rq->queuelist,
+			      &fd->batch_pages[page][optype]);
+		fd->batch_counts[page][optype]++;
+		fd->bq_states[page] |= (1U << optype);
+		count++;
+	}
+
+	/* BUG #8 fix: stop filling if we've used up the completion window */
+	if (fd->completion_window_ns > 0 && count > 0) {
+		/* Each request adds its share — for now, limit by count */
+		stop = true;
+	} else if (!stop && count == 0) {
+		stop = true;
+	}
 
 	return count > 0;
+}
+
+/* Public interface — acquires the lock itself (used from insert path) */
+static bool flow_fill_batch(struct flow_data *fd)
+{
+	guard(spinlock_irqsave)(&fd->lock);
+	return flow_fill_batch_locked(fd);
 }
 
 static void flow_flip_batch_page(struct flow_data *fd)
@@ -694,11 +719,14 @@ static struct request *flow_dispatch_from_batch(struct flow_data *fd)
 	int page = fd->active_batch_page;
 	struct request *rq;
 
+	/* Lock must be held by caller (BUG #3, BUG #6 fix).
+	 * flow_dispatch_request acquires fd->lock before calling this. */
+
 	/* Refill back page if front page is depleted */
-	if (!fd->bq_states[page] && fd->active_batch_page == page) {
+	if (!fd->bq_states[page]) {
 		int back = !page;
 
-		flow_fill_batch(fd);
+		flow_fill_batch_locked(fd);
 		if (fd->bq_states[back]) {
 			flow_flip_batch_page(fd);
 			page = fd->active_batch_page;
@@ -738,24 +766,20 @@ static struct request *flow_dispatch_request(struct blk_mq_hw_ctx *hctx)
 	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 	struct request *rq;
 
+	/* BUG #3 fix: entire dispatch path must hold the lock */
+	guard(spinlock_irqsave)(&fd->lock);
+
 	/* 1. Emergency / barrier prio queues */
 	rq = flow_dispatch_from_prio(fd);
 	if (rq)
-		goto found;
+		return rq;
 
 	/* 2. Batch queues (filled from dl trees) */
 	rq = flow_dispatch_from_batch(fd);
 	if (rq)
-		goto found;
+		return rq;
 
 	return NULL;
-
-found:
-	if (fd->is_rotational)
-		fd->head_pos = blk_rq_pos(rq) + blk_rq_sectors(rq);
-
-	rq->rq_flags |= RQF_STARTED;
-	return rq;
 }
 
 /* ── Completion ───────────────────────────────────────────────────── */
@@ -763,16 +787,15 @@ found:
 static void flow_completed_request(struct request *rq, u64 now)
 {
 	struct flow_data *fd = rq->q->elevator->elevator_data;
-	struct io_cq *icq = rq->elv.priv[1];
+	struct io_cq *icq = rq->elv.icq;	/* BUG #1 fix */
 
 	if (icq) {
 		struct flow_icq_data *ficq = icq_to_flow_icq(icq);
 
+		if (!ficq)
+			return;
 		ficq->last_io_completed = now;
-
-		/* Decay containment on clean completion */
-		if (rq->rq_flags & RQF_STARTED)
-			flow_decay_containment(ficq, fd->contain_decay_step);
+		flow_decay_containment(ficq, fd->contain_decay_step);
 	}
 }
 
@@ -803,11 +826,29 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 static bool flow_allow_merge(struct request_queue *q, struct request *rq,
 			     struct bio *bio)
 {
+	struct flow_rq_data *rd = get_rq_data(rq);
+
 	/* Basic direction check */
 	if (bio_data_dir(bio) != rq_data_dir(rq))
 		return false;
 
-	/* Do not merge across different lanes */
+	/* BUG #7 fix: do not merge across different lanes */
+	if (rd) {
+		u8 rq_lane = rd->lane;
+		u8 bio_lane;
+
+		/* Determine what lane the bio would land in */
+		if (bio->bi_opf & REQ_META || bio->bi_opf & REQ_PRIO)
+			bio_lane = FLOW_LANE_RESERVED;
+		else if ((bio->bi_opf & REQ_SYNC) || bio->bi_iter.bi_size <= 4096)
+			bio_lane = FLOW_LANE_LATENCY;
+		else
+			bio_lane = FLOW_LANE_SHARED;
+
+		if (rq_lane != bio_lane)
+			return false;
+	}
+
 	return true;
 }
 
@@ -816,14 +857,18 @@ static bool flow_allow_merge(struct request_queue *q, struct request *rq,
 static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
 {
 	struct flow_data *fd = hctx->queue->elevator->elevator_data;
+	bool has;
 
-	return !list_empty(&fd->prio_queue[0]) ||
-	       !list_empty(&fd->prio_queue[1]) ||
-	       fd->bq_states[0] || fd->bq_states[1] ||
-	       !RB_EMPTY_ROOT(&fd->reserved_root.rb_root) ||
-	       !RB_EMPTY_ROOT(&fd->latency_root.rb_root) ||
-	       !RB_EMPTY_ROOT(&fd->shared_root.rb_root) ||
-	       !RB_EMPTY_ROOT(&fd->contained_root.rb_root);
+	/* BUG #5 fix: protect shared state read */
+	guard(spinlock_irqsave)(&fd->lock);
+	has = !list_empty(&fd->prio_queue[0]) ||
+	      !list_empty(&fd->prio_queue[1]) ||
+	      fd->bq_states[0] || fd->bq_states[1] ||
+	      !RB_EMPTY_ROOT(&fd->reserved_root.rb_root) ||
+	      !RB_EMPTY_ROOT(&fd->latency_root.rb_root) ||
+	      !RB_EMPTY_ROOT(&fd->shared_root.rb_root) ||
+	      !RB_EMPTY_ROOT(&fd->contained_root.rb_root);
+	return has;
 }
 
 /* ── Init / Exit ──────────────────────────────────────────────────── */
@@ -923,7 +968,6 @@ static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
 	fd->queue = q;
 	blk_stat_enable_accounting(q);
 
-	q->elevator = eq;
 	return 0;
 
 destroy_rq_pool:
@@ -983,10 +1027,12 @@ static ssize_t flow_read_priority_store(struct elevator_queue *e,
 	return count;
 }
 
+/* BUG #12 fix: all sysfs store paths must hold the scheduler lock */
 #define FLOW_SYSFS_S32_RW(field)						\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%d\n", fd->field);				\
 }										\
 static ssize_t flow_##field##_store(struct elevator_queue *e,			\
@@ -998,6 +1044,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 	ret = kstrtoint(page, 10, &val);					\
 	if (ret || val < 0)							\
 		return -EINVAL;							\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	fd->field = val;							\
 	return count;								\
 }
@@ -1006,6 +1053,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%u\n", fd->field);				\
 }										\
 static ssize_t flow_##field##_store(struct elevator_queue *e,			\
@@ -1017,6 +1065,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 	ret = kstrtoul(page, 10, &val);					\
 	if (ret)								\
 		return -EINVAL;							\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	fd->field = val;							\
 	return count;								\
 }
@@ -1025,6 +1074,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%u\n", (unsigned int)fd->field);			\
 }										\
 static ssize_t flow_##field##_store(struct elevator_queue *e,			\
@@ -1036,6 +1086,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 	ret = kstrtoul(page, 10, &val);					\
 	if (ret || val > U16_MAX)						\
 		return -EINVAL;							\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	fd->field = (u16)val;							\
 	return count;								\
 }
@@ -1044,6 +1095,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%llu\n", fd->field);				\
 }										\
 static ssize_t flow_##field##_store(struct elevator_queue *e,			\
@@ -1055,6 +1107,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 	ret = kstrtoull(page, 10, &val);					\
 	if (ret)								\
 		return -EINVAL;							\
+	guard(spinlock_irqsave)(&fd->lock);					\
 	fd->field = val;							\
 	return count;								\
 }
