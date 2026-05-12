@@ -873,22 +873,18 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
 
 /* ── Init / Exit ──────────────────────────────────────────────────── */
 
-static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
+/* Kernel 7.x init_sched signature: passes a pre-allocated elevator_queue.
+ * For older kernels (6.12-, which pass elevator_type), use the
+ * patches/ directory for the compatibility patch.                      */
+static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 {
 	struct flow_data *fd;
-	struct elevator_queue *eq;
 	int ret = -ENOMEM;
-
-	eq = elevator_alloc(q, e);
-	if (!eq) {
-		pr_err("flow-iosched: failed to allocate elevator\n");
-		return ret;
-	}
 
 	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
 	if (!fd) {
 		pr_err("flow-iosched: failed to allocate flow_data\n");
-		goto put_eq;
+		return ret;
 	}
 
 	/* Create memory pools */
@@ -976,8 +972,6 @@ destroy_rq_cache:
 	kmem_cache_destroy(fd->rq_data_cache);
 free_fd:
 	kfree(fd);
-put_eq:
-	kobject_put(&eq->kobj);
 	return ret;
 }
 

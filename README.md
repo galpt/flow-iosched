@@ -25,6 +25,25 @@ Dispatch priority: Emergency > Reserved > Latency > Shared > Contained.
 Starvation counters rotate CPU-intensive I/O flows back into higher lanes so no
 lane is abandoned entirely.
 
+## Kernel Compatibility
+
+flow-iosched targets **Linux 6.18 and later** (including 7.x).  The current
+source uses the kernel 7.x `init_sched` callback signature which passes a
+pre-allocated `elevator_queue *`.  The table below covers the tested range:
+
+| Kernel range | Verified by | Notes |
+|---|---|---|
+| 7.0.x (CachyOS) | CachyOS ships ADIOS, which uses the same elevator API | Default target — use source as-is |
+| 6.18 – 6.19 | Same elevator API as 7.x | Use source as-is |
+| 6.12 – 6.17 | `init_sched` passes `elevator_type *` (different signature) | Apply `patches/0003-flow-iosched-6.12-init_sched.patch` |
+| < 6.12 | No `scoped_guard` / `guard` macros in cleanup.h | Not supported |
+
+The patch variants in `patches/` are modelled after the ADIOS approach of
+shipping separate patches for each kernel cycle.  If your kernel is not listed,
+check whether the `init_sched` callback in your `elevator.h` matches the
+kernel‑7.x `(q, eq)` signature or the older `(q, e)` signature and apply the
+corresponding patch.
+
 ## Building
 
 The scheduler is implemented as a `blk-mq` elevator module.  To build it as a
@@ -32,7 +51,7 @@ standalone kernel module against your running kernel:
 
 ```bash
 cd block
-make
+make -C /lib/modules/$(uname -r)/build M=$(pwd)
 sudo insmod flow-iosched.ko
 echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
 ```
