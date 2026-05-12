@@ -8,6 +8,8 @@ init_sched, while 6.18+ pass (request_queue *, elevator_queue *).
 Apply after 0001-linux7.0-flow-iosched-v1.0.0.patch to replace the
 init_sched function with the older signature and add elevator_alloc().
 
+Order: apply 0001, then 0002.
+
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
  block/flow-iosched.c | 20 ++++++++++++++++++++--
