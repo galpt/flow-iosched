@@ -94,8 +94,8 @@ deadline, plus FIFO priority queues for the emergency and barrier tiers.
 
 Dispatch walks lanes in priority order, pulling requests into batch-sized groups
 before submitting to the device.  Starvation is tracked as round counters per
-lane — when a lane accumulates enough consecutive bypasses the scheduler force-
-dispatches from it, ensuring fairness without wall-clock timers.
+lane — when a lane accumulates enough consecutive bypasses the scheduler
+force-dispatches from it, ensuring fairness without wall-clock timers.
 
 Processes that exceed their I/O budget accumulate a containment score; once the
 score passes the containment threshold their I/O is demoted to the contained
