@@ -35,7 +35,7 @@ pre-allocated `elevator_queue *`.  The table below covers the tested range:
 |---|---|---|
 | 7.0.x (CachyOS) | CachyOS ships `MQ_IOSCHED_ADIOS` (same elevator API) in their Kconfig.iosched | Default target — use source as-is |
 | 6.18 – 6.19 | ADIOS v3.2.0 patches for 6.18.3 use the same `(q, eq)` init_sched signature | Use source as-is |
-| 6.12 – 6.17 | `init_sched` passes `elevator_type *` — ADIOS 6.12.44 patches confirm the old pattern | Apply `patches/0003-flow-iosched-6.12-init_sched.patch` |
+| 6.12 – 6.17 | `init_sched` passes `elevator_type *` — ADIOS 6.12.44 patches confirm the old pattern | Apply `patches/0003-linux6.12-flow-iosched-compat.patch` after 0001 |
 | 5.18 – 6.11 | `scoped_guard` / `guard` macros exist (cleanup.h added in 5.18), but `DEFINE_LOCK_GUARD_1(spinlock_irqsave)` availability is per-release | Untested — may work with additional backports |
 
 The patch variants in `patches/` follow the approach used by

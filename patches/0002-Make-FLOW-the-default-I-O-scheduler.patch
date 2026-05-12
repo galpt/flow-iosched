@@ -1,9 +1,11 @@
 From: Galih Tama <galpt@v.recipes>
-Date: Tue, 12 May 2026 20:56:42 +0700
+Date: Tue, 12 May 2026 22:22:09 +0700
 Subject: [PATCH] Make FLOW the default I/O scheduler
 
 Select flow-iosched as the default blk-mq I/O scheduler when
 CONFIG_MQ_IOSCHED_DEFAULT_FLOW is enabled.
+
+Must be applied after 0001-linux7.0-flow-iosched-v1.0.0.patch.
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
