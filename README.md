@@ -66,17 +66,17 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `flow_version` | RO | — | Current scheduler version |
-| `read_priority` | RW | 7 | Read bias vs writes at same deadline (-20 to 19) |
-| `sync_budget_sectors` | RW | 256 | Reserved lane budget per sync dispatch |
-| `async_budget_sectors` | RW | 1024 | Shared lane budget per async dispatch |
-| `batch_max_read` | RW | 36 | Max read requests per batch |
-| `batch_max_write` | RW | 72 | Max write requests per batch |
-| `completion_window_ns` | RW | 16000000 | Dispatch batch window (nanoseconds) |
+| `read_priority` | RW | 0 | Read bias vs writes at same deadline (-20 to 19) |
+| `sync_budget_sectors` | RW | 2048 | Reserved lane budget per sync dispatch |
+| `async_budget_sectors` | RW | 512 | Shared lane budget per async dispatch |
+| `batch_max_read` | RW | 16 | Max read requests per batch |
+| `batch_max_write` | RW | 32 | Max write requests per batch |
+| `completion_window_ns` | RW | 8000000 | Dispatch batch window (nanoseconds) |
 | `starvation_max_reserved` | RW | 5 | Reserved starvation rounds before forced rotation |
-| `starvation_max_shared` | RW | 12 | Shared starvation rounds before forced dispatch |
-| `starvation_max_contained` | RW | 6 | Contained starvation rounds before rescue |
-| `contain_threshold` | RW | 3 | Hog containment activation score |
-| `contain_decay_step` | RW | 1 | Containment score decay per idle interval |
+| `starvation_max_shared` | RW | 20 | Shared starvation rounds before forced dispatch |
+| `starvation_max_contained` | RW | 30 | Contained starvation rounds before rescue |
+| `contain_threshold` | RW | 100 | Hog containment activation score |
+| `contain_decay_step` | RW | 8 | Containment score decay per idle interval |
 
 ## Design
 
@@ -97,6 +97,36 @@ lane until the score decays below the threshold again.
 For a more detailed walkthrough of the lane classification and starvation
 tracking logic that flow-iosched adapts, see the
 [scx_flow README](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow).
+
+## Credits
+
+flow-iosched stands on the shoulders of several I/O and CPU scheduling
+projects that shaped its design:
+
+- **ADIOS** — Adaptive Deadline I/O Scheduler. The batch queue architecture,
+  deadline-based rbtrees, and kernel integration pattern are directly adapted
+  from ADIOS v3.2.0 (firelzrd/adios).  The per-request lifecycle pattern
+  (`prepare_request` / `finish_request`) and the prio_queue + dl_tree data
+  structure design follow ADIOS closely.
+- **Kyber** — The `limit_depth` async queue depth throttle and the
+  `QUEUE_FLAG_SQ_SCHED` dispatch model follow the Kyber I/O scheduler's
+  approach to blk-mq integration.
+- **BFQ** — The per-process I/O budget and containment scoring system is
+  loosely inspired by BFQ's per-process I/O contexts and proportional-share
+  tracking.
+- **scx_flow** — The lane-based priority classification, starvation-aware
+  round counters, budget refill mechanics, and hog containment model are
+  direct adaptations of the scx_flow CPU scheduler's design for the block
+  layer.
+- **mq-deadline** — The merge-rbtree helpers (`former_request`,
+  `next_request`) and the basic bio-merge integration follow the mq-deadline
+  reference implementation.
+- **Linux kernel block layer contributors** — The elevator API, blk-mq
+  dispatch framework, and sbitmap infrastructure that flow-iosched builds on.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 
