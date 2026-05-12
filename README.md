@@ -58,7 +58,7 @@ The `patches/` directory follows the approach used by
 [ADIOS](https://github.com/firelzrd/adios), shipping separate patches per
 kernel cycle.
 
-### Building as a standalone module (recommended)
+### Building as a Standalone Module (Recommended)
 
 > [!TIP]
 > The standalone build does not require patching the kernel — build against
@@ -74,7 +74,7 @@ echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
 To make the selection persist across reboots, add the `echo` line to your
 initramfs scripts (e.g. `/etc/initramfs-tools/scripts/init-top/`).
 
-### Integrating into a kernel tree
+### Integrating Into a Kernel Tree
 
 1. Apply `patches/0001-linux7.0-flow-iosched-v1.0.0.patch` — creates the
    scheduler source, Kconfig entry, and Makefile target.
