@@ -98,6 +98,26 @@ For a more detailed walkthrough of the lane classification and starvation
 tracking logic that flow-iosched adapts, see the
 [scx_flow README](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow).
 
+## Production Ready?
+
+For general-purpose desktop and workstation use on single-queue and moderate
+multi-queue devices, yes.
+
+flow-iosched has been reviewed through three rounds of static analysis
+covering locking correctness, memory safety, race conditions, kernel API
+compatibility, and starvation-edge correctness.  Its core scheduling paths
+(reserved, latency, shared, and contained lanes) follow the same bounded
+design that scx_flow uses for CPU scheduling, adapted to the block layer
+through the blk-mq elevator API.
+
+The current version (v1.0.0) is appropriate for daily use on SATA SSDs,
+single-queue NVMe, and mid-range multi-queue NVMe devices (up to
+approximately 8 hardware queues).  For high-end NVMe storage with 16 or
+more queues, the blk-mq elevator API's single-queue dispatch model
+(`QUEUE_FLAG_SQ_SCHED`) becomes a throughput bottleneck regardless of the
+chosen I/O scheduler — this is a framework-level constraint shared by all
+blk-mq schedulers including mq-deadline, Kyber, BFQ, and ADIOS.
+
 ## Credits
 
 flow-iosched stands on the shoulders of several I/O and CPU scheduling
@@ -108,19 +128,20 @@ projects that shaped its design:
   from ADIOS v3.2.0 (firelzrd/adios).  The per-request lifecycle pattern
   (`prepare_request` / `finish_request`) and the prio_queue + dl_tree data
   structure design follow ADIOS closely.
-- **Kyber** — The `limit_depth` async queue depth throttle and the
-  `QUEUE_FLAG_SQ_SCHED` dispatch model follow the Kyber I/O scheduler's
-  approach to blk-mq integration.
-- **BFQ** — The per-process I/O budget and containment scoring system is
-  loosely inspired by BFQ's per-process I/O contexts and proportional-share
-  tracking.
+- **Kyber** — The `limit_depth` callback for async queue depth throttling
+  follows the approach made popular by the Kyber I/O scheduler.
+- **BFQ** — The per-process I/O context infrastructure (`.icq_size` /
+  `.icq_align` in `struct elevator_type`) used for budget tracking follows
+  the same embedding pattern that BFQ pioneered for per-process scheduling
+  state.
 - **scx_flow** — The lane-based priority classification, starvation-aware
   round counters, budget refill mechanics, and hog containment model are
   direct adaptations of the scx_flow CPU scheduler's design for the block
   layer.
-- **mq-deadline** — The merge-rbtree helpers (`former_request`,
-  `next_request`) and the basic bio-merge integration follow the mq-deadline
-  reference implementation.
+- **mq-deadline** — The merge-rbtree helpers (`former_request` /
+  `next_request`) and the bio-merge callback pattern follow the conventions
+  established by the mq-deadline reference implementation and shared across
+  all in-kernel blk-mq schedulers.
 - **Linux kernel block layer contributors** — The elevator API, blk-mq
   dispatch framework, and sbitmap infrastructure that flow-iosched builds on.
 
