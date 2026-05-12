@@ -27,22 +27,22 @@ lane is abandoned entirely.
 
 ## Kernel Compatibility
 
-flow-iosched targets **Linux 6.18 and later** (including 7.x).  The current
+flow-iosched targets **Linux 6.12 and later** (including 7.x).  The current
 source uses the kernel 7.x `init_sched` callback signature which passes a
 pre-allocated `elevator_queue *`.  The table below covers the tested range:
 
 | Kernel range | Verified by | Notes |
 |---|---|---|
-| 7.0.x (CachyOS) | CachyOS ships ADIOS, which uses the same elevator API | Default target — use source as-is |
-| 6.18 – 6.19 | Same elevator API as 7.x | Use source as-is |
-| 6.12 – 6.17 | `init_sched` passes `elevator_type *` (different signature) | Apply `patches/0003-flow-iosched-6.12-init_sched.patch` |
-| < 6.12 | No `scoped_guard` / `guard` macros in cleanup.h | Not supported |
+| 7.0.x (CachyOS) | CachyOS ships `MQ_IOSCHED_ADIOS` (same elevator API) in their Kconfig.iosched | Default target — use source as-is |
+| 6.18 – 6.19 | ADIOS v3.2.0 patches for 6.18.3 use the same `(q, eq)` init_sched signature | Use source as-is |
+| 6.12 – 6.17 | `init_sched` passes `elevator_type *` — ADIOS 6.12.44 patches confirm the old pattern | Apply `patches/0003-flow-iosched-6.12-init_sched.patch` |
+| 5.18 – 6.11 | `scoped_guard` / `guard` macros exist (cleanup.h added in 5.18), but `DEFINE_LOCK_GUARD_1(spinlock_irqsave)` availability is per-release | Untested — may work with additional backports |
 
-The patch variants in `patches/` are modelled after the ADIOS approach of
-shipping separate patches for each kernel cycle.  If your kernel is not listed,
-check whether the `init_sched` callback in your `elevator.h` matches the
-kernel‑7.x `(q, eq)` signature or the older `(q, e)` signature and apply the
-corresponding patch.
+The patch variants in `patches/` follow the approach used by
+[ADIOS](https://github.com/firelzrd/adios) of shipping separate patches for
+each kernel cycle.  If your kernel is not listed, check whether the
+`init_sched` callback in your `elevator.h` matches the kernel‑7.x `(q, eq)`
+signature or the older `(q, e)` signature and apply the corresponding patch.
 
 ## Building
 
@@ -123,27 +123,31 @@ blk-mq schedulers including mq-deadline, Kyber, BFQ, and ADIOS.
 flow-iosched stands on the shoulders of several I/O and CPU scheduling
 projects that shaped its design:
 
-- **ADIOS** — Adaptive Deadline I/O Scheduler. The batch queue architecture,
-  deadline-based rbtrees, and kernel integration pattern are directly adapted
-  from ADIOS v3.2.0 (firelzrd/adios).  The per-request lifecycle pattern
-  (`prepare_request` / `finish_request`) and the prio_queue + dl_tree data
-  structure design follow ADIOS closely.
-- **Kyber** — The `limit_depth` callback for async queue depth throttling
-  follows the approach made popular by the Kyber I/O scheduler.
-- **BFQ** — The per-process I/O context infrastructure (`.icq_size` /
-  `.icq_align` in `struct elevator_type`) used for budget tracking follows
-  the same embedding pattern that BFQ pioneered for per-process scheduling
-  state.
-- **scx_flow** — The lane-based priority classification, starvation-aware
-  round counters, budget refill mechanics, and hog containment model are
-  direct adaptations of the scx_flow CPU scheduler's design for the block
-  layer.
-- **mq-deadline** — The merge-rbtree helpers (`former_request` /
-  `next_request`) and the bio-merge callback pattern follow the conventions
-  established by the mq-deadline reference implementation and shared across
-  all in-kernel blk-mq schedulers.
+- **[ADIOS](https://github.com/firelzrd/adios)** — Adaptive Deadline I/O
+  Scheduler.  The batch queue architecture, deadline-based rbtrees, and kernel
+  integration pattern are directly adapted from ADIOS v3.2.0.  The per-request
+  lifecycle pattern (`prepare_request` / `finish_request`) and the prio_queue +
+  dl_tree data structure design follow ADIOS closely.
+- **[Kyber](https://github.com/torvalds/linux/blob/master/block/kyber-iosched.c)**
+  — The `limit_depth` callback for async queue depth throttling follows the
+  approach made popular by the Kyber I/O scheduler.
+- **[BFQ](https://github.com/torvalds/linux/blob/master/block/bfq-iosched.c)**
+  — The per-process I/O context infrastructure (`.icq_size` / `.icq_align` in
+  `struct elevator_type`) used for budget tracking follows the same embedding
+  pattern that BFQ pioneered for per-process scheduling state.
+- **[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)**
+  — The lane-based priority classification, starvation-aware round counters,
+  budget refill mechanics, and hog containment model are direct adaptations of
+  the scx_flow CPU scheduler's design for the block layer.
+- **[mq-deadline](https://github.com/torvalds/linux/blob/master/block/mq-deadline.c)**
+  — The merge-rbtree helpers (`former_request` / `next_request`) and the
+  bio-merge callback pattern follow the conventions established by the
+  mq-deadline reference implementation and shared across all in-kernel blk-mq
+  schedulers.
 - **Linux kernel block layer contributors** — The elevator API, blk-mq
   dispatch framework, and sbitmap infrastructure that flow-iosched builds on.
+  These are developed at
+  [torvalds/linux/block](https://github.com/torvalds/linux/tree/master/block).
 
 ## Contributing
 
