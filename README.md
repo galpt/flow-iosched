@@ -44,10 +44,20 @@ each kernel cycle.  If your kernel is not listed, check whether the
 `init_sched` callback in your `elevator.h` matches the kernel‑7.x `(q, eq)`
 signature or the older `(q, e)` signature and apply the corresponding patch.
 
-## Building
+When applying for kernel integration:
 
-The scheduler is implemented as a `blk-mq` elevator module.  To build it as a
-standalone kernel module against your running kernel:
+1. Apply `patches/0001-linux7.0-flow-iosched-v1.0.0.patch` — creates the
+   scheduler source and adds Kconfig/Makefile/elevator entries.
+2. For kernels 6.12 – 6.17, also apply
+   `patches/0003-linux6.12-flow-iosched-compat.patch` to fix the
+   `init_sched` callback signature.
+3. Enable `CONFIG_MQ_IOSCHED_FLOW=m` (or `=y`) in your kernel config.
+   Optionally enable `CONFIG_MQ_IOSCHED_DEFAULT_FLOW=y` to make
+   flow-iosched the default scheduler on boot (this modifies
+   `elevator_set_default()` in the kernel's `block/elevator.c`).
+4. Build and install the kernel.
+
+For runtime selection without recompiling, build as a standalone module:
 
 ```bash
 cd block
@@ -55,9 +65,6 @@ make -C /lib/modules/$(uname -r)/build M=$(pwd)
 sudo insmod flow-iosched.ko
 echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
 ```
-
-To integrate permanently, apply the patches from `patches/` against a kernel
-tree and enable `CONFIG_MQ_IOSCHED_FLOW` / `CONFIG_MQ_IOSCHED_DEFAULT_FLOW`.
 
 ## Sysfs Tunables
 
