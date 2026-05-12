@@ -10,10 +10,10 @@ init_sched function with the older signature and add elevator_alloc().
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/flow-iosched.c | 22 ++++++++++++++++++++--
- 17 insertions(+), 5 deletions(-)
+ block/flow-iosched.c | 20 ++++++++++++++++++++--
+ 16 insertions(+), 4 deletions(-)
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index cd99299..d97afc8 100644
+index 8568798..779cadd 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
 @@ -872,18 +872,27 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
@@ -22,11 +22,10 @@ index cd99299..d97afc8 100644
  
 -/* Kernel 7.x init_sched signature: passes a pre-allocated elevator_queue.
 - * For older kernels (6.12-, which pass elevator_type), use the
-- * patches/ directory for the compatibility patch.                      */
--static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 +/* 6.12-compat init_sched signature: passes a pre-allocated elevator_queue.
-+ * For kernel 7.x (6.18+, which passes elevator_queue), apply
-+ * the inverse patch from flow-iosched/patches/.                      */
++ * For kernel 7.x (6.18+, which passes elevator_queue), use the
+  * patches/ directory for the compatibility patch.                      */
+-static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 +static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
  {
  	struct flow_data *fd;

@@ -85,7 +85,7 @@ enum flow_optype {
 /* ── Per-request scheduler data ───────────────────────────────────── */
 struct flow_rq_data {
 	struct list_head	dl_node;	/* node in dl_group->rqs */
-	struct dl_group		*dl_group;	/* owning dl_group (BUG #2 fix) */
+	struct dl_group		*dl_group;	/* back-pointer to owning dl_group */
 	struct request		*rq;		/* back-pointer */
 	u64			deadline;	/* absolute deadline */
 	u32			block_size;	/* blk_rq_bytes(rq) */
@@ -354,7 +354,7 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 	rb_insert_color_cached(&dlg->node, root, leftmost);
 
 found:
-	rd->dl_group = dlg;	/* BUG #2 fix: store owning dl_group */
+	rd->dl_group = dlg;	/* store back-pointer for O(1) dl_group removal */
 	list_add_tail(&rd->dl_node, &dlg->rqs);
 }
 
@@ -368,7 +368,7 @@ static void flow_del_from_dl_tree(struct flow_data *fd, u8 lane,
 	if (!root || !rd || !rd->dl_group || list_empty(&rd->dl_node))
 		return;
 
-	dlg = rd->dl_group;	/* BUG #2 fix: use stored pointer */
+	dlg = rd->dl_group;	/* use stored back-pointer instead of container_of */
 	rd->dl_group = NULL;
 	list_del_init(&rd->dl_node);
 	if (list_empty(&dlg->rqs)) {
@@ -459,12 +459,12 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	struct request_queue *q = hctx->queue;
 	struct flow_data *fd = q->elevator->elevator_data;
 	struct flow_rq_data *rd = get_rq_data(rq);
-	struct io_cq *icq = rq->elv.icq;	/* BUG #1 fix */
+	struct io_cq *icq = rq->elv.icq;	/* use rq->elv.icq for io_cq access */
 	struct flow_icq_data *ficq = NULL;
 	u8 lane;
 	bool contained = false;
 
-	/* BUG #4 fix: guard against NULL priv[0] from prepare_request failure */
+	/* guard against NULL priv[0] when mempool_alloc fails in prepare_request */
 	if (!rd)
 		return;
 
@@ -586,7 +586,7 @@ static bool flow_fill_batch_locked(struct flow_data *fd)
 	u32 count = 0;
 	bool stop = false;
 
-	/* BUG #10 fix: verify back page is empty before overwriting */
+	/* verify back page is empty before overwriting (WARN on data loss) */
 	WARN_ON_ONCE(fd->bq_states[page] != 0);
 
 	memset(&fd->batch_counts[page], 0, sizeof(fd->batch_counts[page]));
@@ -596,7 +596,7 @@ static bool flow_fill_batch_locked(struct flow_data *fd)
 	for (int i = 0; i < FLOW_NR_OPTYPES; i++)
 		INIT_LIST_HEAD(&fd->batch_pages[page][i]);
 
-	/* BUG #8 fix: implement completion_window_ns batching */
+	/* batch fill loop: move requests from dl-trees into batch queues */
 	for (int i = 0; i < FLOW_MAX_DELETES_PER_LOCK &&
 	     !stop && count < FLOW_MAX_DELETES_PER_LOCK; i++) {
 		struct flow_rq_data *rd;
@@ -636,7 +636,7 @@ static bool flow_fill_batch_locked(struct flow_data *fd)
 		for (u8 l = lane + 1; l < FLOW_NR_LANES; l++)
 			fd->starvation_rounds[l]++;
 
-		/* BUG #9 fix: skip exhausted op-types instead of aborting */
+		/* skip exhausted op-types instead of aborting the entire fill */
 		rq = rd->rq;
 		optype = flow_optype(rq);
 		if (optype == FLOW_READ &&
@@ -655,7 +655,7 @@ static bool flow_fill_batch_locked(struct flow_data *fd)
 		count++;
 	}
 
-	/* BUG #8 fix: stop filling if we've used up the completion window */
+	/* stop filling if the completion window budget is exhausted */
 	if (fd->completion_window_ns > 0 && count > 0) {
 		/* Each request adds its share — for now, limit by count */
 		stop = true;
@@ -762,7 +762,7 @@ static struct request *flow_dispatch_request(struct blk_mq_hw_ctx *hctx)
 	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 	struct request *rq;
 
-	/* BUG #3 fix: entire dispatch path must hold the lock */
+	/* dispatch path must hold the lock for data structure safety */
 	guard(spinlock_irqsave)(&fd->lock);
 
 	/* 1. Emergency / barrier prio queues */
@@ -783,7 +783,7 @@ static struct request *flow_dispatch_request(struct blk_mq_hw_ctx *hctx)
 static void flow_completed_request(struct request *rq, u64 now)
 {
 	struct flow_data *fd = rq->q->elevator->elevator_data;
-	struct io_cq *icq = rq->elv.icq;	/* BUG #1 fix */
+	struct io_cq *icq = rq->elv.icq;	/* use rq->elv.icq for io_cq access */
 
 	/* Data race fix: protect per-process budget/containment updates. */
 	guard(spinlock_irqsave)(&fd->lock);
@@ -831,7 +831,7 @@ static bool flow_allow_merge(struct request_queue *q, struct request *rq,
 	if (bio_data_dir(bio) != rq_data_dir(rq))
 		return false;
 
-	/* BUG #7 fix: do not merge across different lanes */
+	/* reject merges that cross lane boundaries (avoids priority inversion) */
 	if (rd) {
 		u8 rq_lane = rd->lane;
 		u8 bio_lane;
@@ -858,7 +858,7 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
 	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 	bool has;
 
-	/* BUG #5 fix: protect shared state read */
+	/* protect shared state read from concurrent insert/dispatch */
 	guard(spinlock_irqsave)(&fd->lock);
 	has = !list_empty(&fd->prio_queue[0]) ||
 	      !list_empty(&fd->prio_queue[1]) ||
@@ -1022,7 +1022,7 @@ static ssize_t flow_read_priority_store(struct elevator_queue *e,
 	return count;
 }
 
-/* BUG #12 fix: all sysfs store paths must hold the scheduler lock */
+/* all sysfs store/show paths must hold the scheduler lock */
 #define FLOW_SYSFS_S32_RW(field)						\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
