@@ -133,9 +133,10 @@ to the block layer through the blk-mq elevator API.
 
 ## Benchmarks
 
-Performance measurements depend heavily on hardware and workload.  The results
-below provide a reference point; your mileage will vary with device speed, CPU
-generation, queue depth, and access pattern.
+Benchmarking flow-iosched against the in-kernel schedulers requires building a
+kernel with the scheduler integrated (the `elevator.h` header is not exported
+for out-of-tree module builds).  The test setup and scripts are located at
+[bench-tests/](https://github.com/galpt/flow-iosched/tree/main/bench-tests).
 
 ### Test Environment
 
@@ -143,7 +144,7 @@ generation, queue depth, and access pattern.
 |---|---|
 | CPU | AMD Ryzen 7 6800H (8 cores / 16 threads, 3.2 GHz base) |
 | Memory | 58 GB DDR5 |
-| NVMe drive 1 | 512 GB (NVMe, 4 queues) — main test device |
+| NVMe drive 1 | 512 GB (NVMe, 4 queues) |
 | NVMe drive 2 | Intel SSDPEKNW512GZL (512 GB, 4 queues) |
 | Kernel | 7.0.5-2-cachyos, PREEMPT_DYNAMIC |
 | Platform | CachyOS Linux |
@@ -159,19 +160,17 @@ generation, queue depth, and access pattern.
 | Sequential write | 128 KiB | 8 | 0/100 | Bulk throughput (I/O-bound) |
 | Mixed random | 4 KiB | 8 | 70/30 | Lane interaction under contention |
 
-### Flow-Specific Tunings Applied During Testing
-
-| Tunable | Value | Rationale |
-|---|---|---|
-| `sync_budget_sectors` | 2048 | Default — 1 MiB per sync dispatch |
-| `async_budget_sectors` | 512 | Default — 256 KiB per async dispatch |
-| `batch_max_read` | 16 | Default — moderate read batching |
-| `batch_max_write` | 32 | Default — generous write batching |
+> [!NOTE]
+> Benchmark results are not yet available.  The workloads above are the planned
+> test suite.  Results will be published here once the kernel integration build
+> is complete and runs have been collected.  See
+> [bench-tests/](https://github.com/galpt/flow-iosched/tree/main/bench-tests)
+> for the build scripts and benchmark runner.
 
 ### Publishing Results
 
-flow-iosched is at an early stage and independent benchmark reports are
-welcome.  If you run comparisons, please include:
+Independent benchmark reports are welcome.  If you run comparisons, please
+include:
 
 - Full hardware description (CPU, memory, storage model)
 - Kernel version and scheduler configuration
