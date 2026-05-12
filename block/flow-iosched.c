@@ -436,8 +436,11 @@ static void flow_remove_request(struct flow_data *fd, struct request *rq,
 {
 	struct flow_rq_data *rd = get_rq_data(rq);
 
-	if (!list_empty(&rd->dl_node))
-		flow_del_from_dl_tree(fd, rd->lane, rq);
+	/* NULL priv[0] guard — prepare_request may have failed. */
+	if (rd) {
+		if (!list_empty(&rd->dl_node))
+			flow_del_from_dl_tree(fd, rd->lane, rq);
+	}
 
 	flow_del_from_merge_rb(fd, rq);
 
@@ -578,6 +581,7 @@ static inline u8 flow_starved_lane(struct flow_data *fd)
  * to avoid deadlock when dispatch_request holds the lock.          */
 static bool flow_fill_batch_locked(struct flow_data *fd)
 {
+	lockdep_assert_held(&fd->lock);
 	int page = !fd->active_batch_page;
 	u32 count = 0;
 	bool stop = false;
@@ -662,13 +666,6 @@ static bool flow_fill_batch_locked(struct flow_data *fd)
 	return count > 0;
 }
 
-/* Public interface — acquires the lock itself (used from insert path) */
-static bool flow_fill_batch(struct flow_data *fd)
-{
-	guard(spinlock_irqsave)(&fd->lock);
-	return flow_fill_batch_locked(fd);
-}
-
 static void flow_flip_batch_page(struct flow_data *fd)
 {
 	fd->active_batch_page = !fd->active_batch_page;
@@ -719,8 +716,7 @@ static struct request *flow_dispatch_from_batch(struct flow_data *fd)
 	int page = fd->active_batch_page;
 	struct request *rq;
 
-	/* Lock must be held by caller (BUG #3, BUG #6 fix).
-	 * flow_dispatch_request acquires fd->lock before calling this. */
+	lockdep_assert_held(&fd->lock);
 
 	/* Refill back page if front page is depleted */
 	if (!fd->bq_states[page]) {
@@ -788,6 +784,9 @@ static void flow_completed_request(struct request *rq, u64 now)
 {
 	struct flow_data *fd = rq->q->elevator->elevator_data;
 	struct io_cq *icq = rq->elv.icq;	/* BUG #1 fix */
+
+	/* Data race fix: protect per-process budget/containment updates. */
+	guard(spinlock_irqsave)(&fd->lock);
 
 	if (icq) {
 		struct flow_icq_data *ficq = icq_to_flow_icq(icq);
@@ -938,8 +937,9 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 	fd->contain_threshold		= FLOW_CONTAIN_THRESHOLD_DEFAULT;
 	fd->contain_decay_step		= FLOW_CONTAIN_DECAY_STEP_DEFAULT;
 
-	/* Starvation defaults */
+	/* Starvation defaults (0 = no starvation override for that lane) */
 	fd->starvation_max[FLOW_LANE_RESERVED]	= FLOW_STARVATION_MAX_DEFAULT_RESERVED;
+	fd->starvation_max[FLOW_LANE_LATENCY]	= FLOW_STARVATION_MAX_DEFAULT_RESERVED;
 	fd->starvation_max[FLOW_LANE_SHARED]	= FLOW_STARVATION_MAX_DEFAULT_SHARED;
 	fd->starvation_max[FLOW_LANE_CONTAINED]	= FLOW_STARVATION_MAX_DEFAULT_CONTAINED;
 
@@ -981,6 +981,7 @@ static void flow_exit_sched(struct elevator_queue *e)
 
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
+	WARN_ON_ONCE(fd->bq_states[0] || fd->bq_states[1]);
 
 	mempool_destroy(fd->rq_data_pool);
 	kmem_cache_destroy(fd->rq_data_cache);
@@ -1001,7 +1002,7 @@ static ssize_t flow_version_show(struct elevator_queue *e, char *page)
 static ssize_t flow_read_priority_show(struct elevator_queue *e, char *page)
 {
 	struct flow_data *fd = e->elevator_data;
-
+	guard(spinlock_irqsave)(&fd->lock);
 	return sprintf(page, "%d\n", fd->read_priority);
 }
 
@@ -1111,9 +1112,34 @@ FLOW_SYSFS_S32_RW(async_budget_sectors)
 FLOW_SYSFS_U16_RW(batch_max_read)
 FLOW_SYSFS_U16_RW(batch_max_write)
 FLOW_SYSFS_U64_RW(completion_window_ns)
-FLOW_SYSFS_U32_RW(starvation_max_reserved)
-FLOW_SYSFS_U32_RW(starvation_max_shared)
-FLOW_SYSFS_U32_RW(starvation_max_contained)
+
+/* starvation_max is an array, not a scalar field — need custom accessors */
+#define FLOW_STARVATION_ATTR_RW(lane, field_suffix, lane_idx)		\
+static ssize_t flow_starvation_max_##field_suffix##_show(		\
+	struct elevator_queue *e, char *page)				\
+{									\
+	struct flow_data *fd = e->elevator_data;			\
+	guard(spinlock_irqsave)(&fd->lock);				\
+	return sprintf(page, "%u\n", fd->starvation_max[lane_idx]);	\
+}									\
+static ssize_t flow_starvation_max_##field_suffix##_store(		\
+	struct elevator_queue *e, const char *page, size_t count)	\
+{									\
+	struct flow_data *fd = e->elevator_data;			\
+	unsigned long val;						\
+	int ret;							\
+	ret = kstrtoul(page, 10, &val);					\
+	if (ret)							\
+		return -EINVAL;						\
+	guard(spinlock_irqsave)(&fd->lock);				\
+	fd->starvation_max[lane_idx] = (u32)val;			\
+	return count;							\
+}
+
+FLOW_STARVATION_ATTR_RW(reserved, reserved, FLOW_LANE_RESERVED)
+FLOW_STARVATION_ATTR_RW(shared, shared, FLOW_LANE_SHARED)
+FLOW_STARVATION_ATTR_RW(contained, contained, FLOW_LANE_CONTAINED)
+
 FLOW_SYSFS_U32_RW(contain_threshold)
 FLOW_SYSFS_U32_RW(contain_decay_step)
 
