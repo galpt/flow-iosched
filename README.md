@@ -5,13 +5,11 @@ budget and classification design of the
 [scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)
 CPU scheduler.
 
-## Overview
+> [!NOTE]
+> flow-iosched targets the same audience as its CPU-side inspiration: general-purpose
+> desktop and workstation machines where responsiveness and throughput both matter.
 
-flow-iosched classifies I/O requests into bounded priority lanes and dispatches
-them through a starvation-aware round-counter system.  The same design patterns
-that keep interactive wakeups responsive in scx_flow — bounded service lanes,
-budget tracking, containment for hogs, and O(1) starvation counters — are
-mapped to I/O request handling.
+## Overview
 
 | Lane | Target I/O | Slice / Window | Behaviour |
 |------|------------|----------------|-----------|
@@ -25,39 +23,46 @@ Dispatch priority: Emergency > Reserved > Latency > Shared > Contained.
 Starvation counters rotate CPU-intensive I/O flows back into higher lanes so no
 lane is abandoned entirely.
 
+## Design
+
+Each request is classified into a lane at insertion time based on its
+`cmd_flags` (sync, meta, flush, priority) and the originating process's I/O
+budget balance.  Per-lane deadline-sorted red-black trees (plus two FIFO
+priority queues for the barrier tiers) feed into batch queues.
+
+Dispatch walks lanes in priority order, pulling requests into batch-sized
+groups before submitting to the device.  Starvation is tracked as round
+counters per lane — when a lane accumulates enough consecutive bypasses the
+scheduler force-dispatches from it, ensuring fairness without wall-clock
+timers.
+
+Processes that exceed their I/O budget accumulate a containment score; once
+the score passes the containment threshold their I/O is demoted to the
+contained lane until the score decays below the threshold again.
+
+> [!TIP]
+> For a deeper walkthrough of the lane classification, budget refill mechanics,
+> and starvation tracking that flow-iosched adapts, see the
+> [scx_flow README](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow).
+
 ## Kernel Compatibility
 
-flow-iosched targets **Linux 6.12 and later** (including 7.x).  The current
-source uses the kernel 7.x `init_sched` callback signature which passes a
-pre-allocated `elevator_queue *`.  The table below covers the tested range:
+| Kernel range | Notes |
+|---|---|
+| 7.0.x (CachyOS) | Default target — use source as-is.  (CachyOS ships `MQ_IOSCHED_ADIOS` which uses the same elevator API.) |
+| 6.18 – 6.19 | Same init_sched API as 7.x — use source as-is. |
+| 6.12 – 6.17 | Older init_sched signature — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after 0001. |
+| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but `DEFINE_LOCK_GUARD_1(spinlock_irqsave)` availability is per-release — untested. |
 
-| Kernel range | Verified by | Notes |
-|---|---|---|
-| 7.0.x (CachyOS) | CachyOS ships `MQ_IOSCHED_ADIOS` (same elevator API) in their Kconfig.iosched | Default target — use source as-is |
-| 6.18 – 6.19 | ADIOS v3.2.0 patches for 6.18.3 use the same `(q, eq)` init_sched signature | Use source as-is |
-| 6.12 – 6.17 | `init_sched` passes `elevator_type *` — ADIOS 6.12.44 patches confirm the old pattern | Apply `patches/0002-linux6.12-flow-iosched-compat.patch` after 0001 |
-| 5.18 – 6.11 | `scoped_guard` / `guard` macros exist (cleanup.h added in 5.18), but `DEFINE_LOCK_GUARD_1(spinlock_irqsave)` availability is per-release | Untested — may work with additional backports |
+The `patches/` directory follows the approach used by
+[ADIOS](https://github.com/firelzrd/adios), shipping separate patches per
+kernel cycle.
 
-The patch variants in `patches/` follow the approach used by
-[ADIOS](https://github.com/firelzrd/adios) of shipping separate patches for
-each kernel cycle.  If your kernel is not listed, check whether the
-`init_sched` callback in your `elevator.h` matches the kernel‑7.x `(q, eq)`
-signature or the older `(q, e)` signature and apply the corresponding patch.
+### Building as a standalone module (recommended)
 
-When applying for kernel integration:
-
-1. Apply `patches/0001-linux7.0-flow-iosched-v1.0.0.patch` — creates the
-   scheduler source and adds Kconfig/Makefile/elevator entries.
-2. For kernels 6.12 – 6.17, also apply
-   `patches/0002-linux6.12-flow-iosched-compat.patch` to fix the
-   `init_sched` callback signature.
-3. Enable `CONFIG_MQ_IOSCHED_FLOW=m` (or `=y`) in your kernel config.
-   Optionally enable `CONFIG_MQ_IOSCHED_DEFAULT_FLOW=y` to make
-   flow-iosched the default scheduler on boot (this modifies
-   `elevator_set_default()` in the kernel's `block/elevator.c`).
-4. Build and install the kernel.
-
-For runtime selection without recompiling, build as a standalone module:
+> [!TIP]
+> The standalone build does not require patching the kernel — build against
+> your running kernel's headers and load at runtime.
 
 ```bash
 cd block
@@ -65,6 +70,29 @@ make -C /lib/modules/$(uname -r)/build M=$(pwd)
 sudo insmod flow-iosched.ko
 echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
 ```
+
+To make the selection persist across reboots, add the `echo` line to your
+initramfs scripts (e.g. `/etc/initramfs-tools/scripts/init-top/`).
+
+### Integrating into a kernel tree
+
+1. Apply `patches/0001-linux7.0-flow-iosched-v1.0.0.patch` — creates the
+   scheduler source, Kconfig entry, and Makefile target.
+2. For kernels 6.12 – 6.17, also apply
+   `patches/0002-linux6.12-flow-iosched-compat.patch`.
+3. Enable `CONFIG_MQ_IOSCHED_FLOW=m` (or `=y`) in your kernel config.
+4. Build and install the kernel, then select the scheduler at runtime:
+
+   ```bash
+   echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
+   ```
+
+> [!IMPORTANT]
+> The `CONFIG_MQ_IOSCHED_DEFAULT_FLOW` Kconfig option lets you make
+> flow-iosched the boot-time default, but wiring it into
+> `elevator_set_default()` in `block/elevator.c` is kernel-version-specific
+> and is **not** handled by the patches.  The standalone module build avoids
+> this entirely — select the scheduler at runtime instead.
 
 ## Sysfs Tunables
 
@@ -85,50 +113,28 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 | `contain_threshold` | RW | 100 | Hog containment activation score |
 | `contain_decay_step` | RW | 8 | Containment score decay per idle interval |
 
-## Design
-
-At insertion time each request is classified into one of the lanes above based
-on its `cmd_flags` (sync, meta, flush, priority) and the originating process's
-I/O budget balance.  The scheduler maintains per-lane red-black trees keyed by
-deadline, plus FIFO priority queues for the emergency and barrier tiers.
-
-Dispatch walks lanes in priority order, pulling requests into batch-sized groups
-before submitting to the device.  Starvation is tracked as round counters per
-lane — when a lane accumulates enough consecutive bypasses the scheduler
-force-dispatches from it, ensuring fairness without wall-clock timers.
-
-Processes that exceed their I/O budget accumulate a containment score; once the
-score passes the containment threshold their I/O is demoted to the contained
-lane until the score decays below the threshold again.
-
-For a more detailed walkthrough of the lane classification and starvation
-tracking logic that flow-iosched adapts, see the
-[scx_flow README](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow).
-
 ## Production Ready?
 
-For general-purpose desktop and workstation use on single-queue and moderate
-multi-queue devices, yes.
+For general-purpose desktop and workstation use on SATA SSDs, single-queue
+NVMe, and mid-range multi-queue NVMe (up to approximately 8 hardware queues),
+yes.
 
 flow-iosched has been reviewed through three rounds of static analysis
 covering locking correctness, memory safety, race conditions, kernel API
 compatibility, and starvation-edge correctness.  Its core scheduling paths
-(reserved, latency, shared, and contained lanes) follow the same bounded
-design that scx_flow uses for CPU scheduling, adapted to the block layer
-through the blk-mq elevator API.
+follow the same bounded design that scx_flow uses for CPU scheduling, adapted
+to the block layer through the blk-mq elevator API.
 
-The current version (v1.0.0) is appropriate for daily use on SATA SSDs,
-single-queue NVMe, and mid-range multi-queue NVMe devices (up to
-approximately 8 hardware queues).  For high-end NVMe storage with 16 or
-more queues, the blk-mq elevator API's single-queue dispatch model
-(`QUEUE_FLAG_SQ_SCHED`) becomes a throughput bottleneck regardless of the
-chosen I/O scheduler — this is a framework-level constraint shared by all
-blk-mq schedulers including mq-deadline, Kyber, BFQ, and ADIOS.
+> [!CAUTION]
+> On high-end NVMe storage with 16 or more queues, the blk-mq elevator API's
+> single-queue dispatch model (`QUEUE_FLAG_SQ_SCHED`) becomes a throughput
+> bottleneck.  This is a framework-level constraint shared by **all** blk-mq
+> schedulers (mq-deadline, Kyber, BFQ, ADIOS) — not a flow-iosched limitation.
 
 ## Credits
 
-flow-iosched stands on the shoulders of several I/O and CPU scheduling
-projects that shaped its design:
+flow-iosched stands on the shoulders of several I/O and CPU scheduling projects
+that shaped its design:
 
 - **[ADIOS](https://github.com/firelzrd/adios)** — Adaptive Deadline I/O
   Scheduler.  The batch queue architecture, deadline-based rbtrees, and kernel
