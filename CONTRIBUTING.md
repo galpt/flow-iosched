@@ -30,6 +30,20 @@ for:
 - **Performance observations** — if you happen to benchmark flow-iosched
   against other schedulers, sharing the results is always appreciated.
 
+### Publishing Benchmark Results
+
+Independent benchmark reports are welcome.  If you run comparisons of
+flow-iosched against other I/O schedulers, please include the following
+information in your report — it helps others reproduce and validate:
+
+- Full hardware description (CPU, memory, storage model)
+- Kernel version and scheduler configuration
+- `fio` job files or equivalent workload description
+- The exact tunable values used
+
+Open an [issue](https://github.com/galpt/flow-iosched/issues) to share
+results or link to a gist.
+
 When reporting a bug, please include the output of:
 
 ```bash

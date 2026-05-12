@@ -19,7 +19,7 @@
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
 #include <linux/compiler.h>
-#include <linux/elevator.h>
+#include "elevator.h"	/* block/elevator.h — in-tree; for out-of-tree use <linux/elevator.h> */
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -426,7 +426,7 @@ static void flow_add_to_merge_rb(struct flow_data *fd, struct request *rq)
 static void flow_del_from_merge_rb(struct flow_data *fd, struct request *rq)
 {
 	if (!RB_EMPTY_NODE(&rq->rb_node))
-		elv_rb_del(&fd->merge_root, rq);
+		elv_rb_del(&fd->merge_root.rb_root, rq);
 }
 
 /* ── Remove request from scheduler (dl_tree + merge_rb) ──────────── */
@@ -818,6 +818,7 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 
 	data->shallow_depth = flow_to_word_depth(data->hctx,
 				data->q->nr_requests / FLOW_ASYNC_DEPTH_RATIO);
+	(void)fd;	/* unused in this version; kept for future parameter use */
 }
 
 /* ── Allow merge ──────────────────────────────────────────────────── */

@@ -167,19 +167,6 @@ for out-of-tree module builds).  The test setup and scripts are located at
 > [bench-tests/](https://github.com/galpt/flow-iosched/tree/main/bench-tests)
 > for the build scripts and benchmark runner.
 
-### Publishing Results
-
-Independent benchmark reports are welcome.  If you run comparisons, please
-include:
-
-- Full hardware description (CPU, memory, storage model)
-- Kernel version and scheduler configuration
-- `fio` job files or equivalent workload description
-- The exact tunable values used
-
-Open an [issue](https://github.com/galpt/flow-iosched/issues) to share results
-or link to a gist.
-
 ## Credits
 
 flow-iosched stands on the shoulders of several I/O and CPU scheduling projects

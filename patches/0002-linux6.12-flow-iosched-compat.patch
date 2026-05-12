@@ -15,10 +15,10 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  block/flow-iosched.c | 20 ++++++++++++++++++++--
  16 insertions(+), 4 deletions(-)
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index 8568798..779cadd 100644
+index aa8ead8..10df62a 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -872,18 +872,27 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
+@@ -873,18 +873,27 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
  
  /* ── Init / Exit ──────────────────────────────────────────────────── */
  
@@ -50,7 +50,7 @@ index 8568798..779cadd 100644
  	}
  
  	/* Create memory pools */
-@@ -970,6 +979,9 @@ destroy_rq_pool:
+@@ -971,6 +980,9 @@ destroy_rq_pool:
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
