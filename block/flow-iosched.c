@@ -1183,7 +1183,7 @@ static struct elevator_type mq_flow = {
 	.elevator_attrs	= flow_sched_attrs,
 	.elevator_name	= "flow-iosched",
 	.elevator_owner	= THIS_MODULE,
-	.icq_size	= sizeof(struct flow_icq_data),
+	.icq_size	= sizeof(struct io_cq) + sizeof(struct flow_icq_data),
 	.icq_align	= __alignof__(struct flow_icq_data),
 };
 
