@@ -90,7 +90,7 @@ find_patch_dir() {
     if [ -d "$FLOW_REPO_DIR" ]; then
         info "Repo already cloned at $FLOW_REPO_DIR, updating ..."
         cd "$FLOW_REPO_DIR"
-        git pull --ff-only 2>/dev/null || warn "Could not update repo; using cached version"
+        git pull --ff-only >/dev/null 2>&1 || warn "Could not update repo; using cached version"
         cd "$OLDPWD"
     else
         mkdir -p "$(dirname "$FLOW_REPO_DIR")"
