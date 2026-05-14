@@ -468,11 +468,11 @@ build_kernel() {
     cd "$kernel_dir"
 
     info "Building kernel (bzImage) with $FLOW_MAKE_JOBS parallel jobs ..."
-    info "This usually takes 10\u201330 minutes. The log below updates in real-time."
+    info "This usually takes 10–30 minutes. The log below updates in real-time."
     nohup_run "build-bzImage.log" make -j"$FLOW_MAKE_JOBS" "$bzimage_target"
     info "bzImage built successfully"
 
-    info "Building kernel modules (may take 5\u201315 minutes) ..."
+    info "Building kernel modules (may take 5–15 minutes) ..."
     nohup_run "build-modules.log" make -j"$FLOW_MAKE_JOBS" modules
     info "Modules built successfully"
 }
