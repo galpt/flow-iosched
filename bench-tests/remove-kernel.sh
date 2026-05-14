@@ -39,7 +39,8 @@ find_limine_conf() {
         /boot/limine/limine.conf \
         /boot/limine.conf \
         /limine/limine.conf \
-        /limine.conf; do
+        /limine.conf \
+        /efi/limine/limine.conf; do
         if [ -f "$candidate" ]; then
             echo "$candidate"
             return 0
@@ -48,16 +49,42 @@ find_limine_conf() {
     echo ""
 }
 
+# Remove all flow-iosched entries from a Limine config file
+remove_flow_limine_entries() {
+    local limine_conf="$1"
+    if [ ! -f "$limine_conf" ]; then
+        return 1
+    fi
+    if ! grep -q "Flow I/O Scheduler" "$limine_conf" 2>/dev/null; then
+        return 0
+    fi
+    info "Removing flow-iosched entries from $limine_conf ..."
+    awk '/^\/Flow I\/O Scheduler/ { skip = 1; next }
+         skip && /^\//             { skip = 0 }
+         !skip' "$limine_conf" > "${limine_conf}.tmp" && \
+        mv "${limine_conf}.tmp" "$limine_conf"
+}
+
 # List all installed flow-iosched kernel versions by scanning /boot
 list_installed() {
     local versions=()
-    for f in /boot/vmlinuz-linux-flow-*; do
+    local ver
+    for f in /boot/vmlinuz-linux-flow-* /boot/config-*-flow; do
         if [ -f "$f" ]; then
-            local ver="${f#/boot/vmlinuz-linux-flow-}"
+            case "$f" in
+                /boot/vmlinuz-linux-flow-*)
+                    ver="${f#/boot/vmlinuz-linux-flow-}"
+                    ;;
+                /boot/config-*-flow)
+                    ver="${f#/boot/config-}"
+                    ver="${ver%-flow}"
+                    ;;
+            esac
             versions+=("$ver")
         fi
     done
-    printf '%s\n' "${versions[@]}"
+    # Deduplicate and sort
+    printf '%s\n' "${versions[@]}" | sort -uV
 }
 
 # Get the full version of the currently-booted kernel (e.g. 7.0.5-2-cachyos or 7.0.5-flow)
@@ -73,7 +100,8 @@ remove_version() {
 
     # Never remove the running kernel — but only if it's actually a flow-iosched kernel
     if [[ "$running" == *-flow* ]] && [ "${version}" = "$(echo "$running" | sed 's/-.*//')" ]; then
-        die "Cannot remove kernel $version — it is the currently-booted flow-iosched kernel."
+        warn "Skipping kernel $version — it is the currently-booted flow-iosched kernel."
+        return 1
     fi
 
     local vmlinuz="/boot/vmlinuz-linux-flow-${version}"
@@ -91,6 +119,8 @@ remove_version() {
 
     if [ "$found" = false ]; then
         warn "No flow-iosched installation found for kernel $version"
+        # Still try to clean Limine entries
+        remove_flow_limine_entries "$(find_limine_conf)" || true
         return 0
     fi
 
@@ -120,28 +150,8 @@ remove_version() {
         rm -rf "$modules_dir"
     fi
 
-    # Remove Limine entries
-    local limine_conf
-    limine_conf=$(find_limine_conf)
-    if [ -n "$limine_conf" ]; then
-        local entry_title="Flow I/O Scheduler (${version})"
-        local fallback_title="Flow I/O Scheduler ${version} (fallback)"
-
-        # Escape dots and slashes for sed (the title contains "I/O")
-        local escaped_title
-        escaped_title="$(printf '%s\n' "$entry_title" | sed 's/[.\/]/\\&/g')"
-        local escaped_fallback
-        escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/[.\/]/\\&/g')"
-
-        if grep -qF "/$entry_title" "$limine_conf" 2>/dev/null; then
-            sed -i "/^\/$escaped_title/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_title/d; }" "$limine_conf"
-            info "Removed Limine entry: $entry_title"
-        fi
-        if grep -qF "/$fallback_title" "$limine_conf" 2>/dev/null; then
-            sed -i "/^\/$escaped_fallback/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_fallback/d; }" "$limine_conf"
-            info "Removed Limine entry: $fallback_title"
-        fi
-    fi
+    # Remove Limine entries (all flow-iosched entries, regardless of version)
+    remove_flow_limine_entries "$(find_limine_conf)" || true
 
     echo ""
     info "Kernel $version removed successfully."

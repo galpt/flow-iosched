@@ -305,7 +305,7 @@ hardware and workloads.
 ## Benchmarks
 
 The [`bench-tests/`](https://github.com/galpt/flow-iosched/tree/main/bench-tests)
-directory provides four scripts for building, testing, analysing, and
+directory provides build, test, analysis, install, and cleanup scripts for
 cleaning up flow-iosched kernels.  Because the `elevator.h` header is not
 exported for out-of-tree module builds, the scheduler must be integrated
 into a kernel tree via the patches and built from source.
@@ -416,10 +416,19 @@ Generates four chart files:
 
 | File | Content |
 |---|---|
-| `charts/iops.png` | Total IOPS per workload, grouped by scheduler |
-| `charts/latency.png` | Read latency per workload, grouped by scheduler |
-| `charts/per_workload.png` | Per-workload IOPS as horizontal bars |
+| `charts/iops.png` | Total IOPS per workload, sorted best-to-worst by average IOPS |
+| `charts/latency.png` | Read latency per workload, sorted best-to-worst by average read latency |
+| `charts/per_workload.png` | Per-workload IOPS sorted best-to-worst per workload |
 | `charts/comparison.png` | Consolidated averages sorted best-to-worst per metric |
+
+#### `install-deps.sh` — Install benchmark dependencies
+
+Installs `fio` and `python-matplotlib`, needed by `run-benchmarks.sh` and
+`plot-results.py`:
+
+```bash
+sudo ./bench-tests/install-deps.sh
+```
 
 #### `remove-kernel.sh` — Safely uninstall test kernels
 

@@ -610,20 +610,15 @@ setup_limine_entry() {
         info "Creating new Limine configuration at $limine_conf"
     fi
 
-    # Escape dots and forward slashes in titles for sed regex safety
-    # (e.g. "Flow I/O Scheduler (7.0.5)" -> "Flow I\/O Scheduler (7\.0\.5)")
-    local escaped_title
-    escaped_title="$(printf '%s\n' "$entry_title" | sed 's/[.\/]/\\&/g')"
-    local escaped_fallback
-    escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/[.\/]/\\&/g')"
-
-    # Remove any existing entry with the same title (from previous runs)
-    if grep -qF "/$entry_title" "$limine_conf" 2>/dev/null; then
-        info "Removing previous entry: $entry_title ..."
-        sed -i "/^\/$escaped_title/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_title/d; }" "$limine_conf"
-    fi
-    if grep -qF "/$fallback_title" "$limine_conf" 2>/dev/null; then
-        sed -i "/^\/$escaped_fallback/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_fallback/d; }" "$limine_conf"
+    # Remove any existing flow-iosched entries (hash + fallback + their bodies)
+    # Uses awk to delete from any line starting with "/Flow I/O Scheduler"
+    # through the next line starting with "/" (the next entry header).
+    if grep -qF "Flow I/O Scheduler" "$limine_conf" 2>/dev/null; then
+        info "Removing old flow-iosched entries from $limine_conf ..."
+        awk '/^\/Flow I\/O Scheduler/ { skip = 1; next }
+             skip && /^\//             { skip = 0 }
+             !skip' "$limine_conf" > "${limine_conf}.tmp" && \
+            mv "${limine_conf}.tmp" "$limine_conf"
     fi
 
     # Append the hash-verified entry
