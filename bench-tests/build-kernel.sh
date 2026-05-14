@@ -190,6 +190,36 @@ is_version_supported() {
     return 0
 }
 
+# ── Long-running command helper ──────────────────────────────────────
+# Runs a command with nohup so it survives terminal disconnect.
+# Output is written to the given log file AND shown on screen.
+KERNEL_BUILD_LOG=""
+
+nohup_run() {
+    local log_file="$1"
+    shift
+
+    KERNEL_BUILD_LOG="$log_file"
+    rm -f "$log_file"
+
+    info "Build output logged to: $(pwd)/${log_file}"
+    info "If the terminal disconnects, check progress with: tail -f $(pwd)/${log_file}"
+
+    # Run the command under nohup so SIGHUP (terminal disconnect) doesn't kill it.
+    nohup "$@" > "$log_file" 2>&1 &
+    local pid=$!
+
+    # Show output in real-time while the process runs.
+    tail -f "$log_file" --pid=$pid
+    wait $pid
+
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        rm -f "$log_file"
+        die "Command failed (exit code $rc): $*"
+    fi
+}
+
 # ── Build tool verification ───────────────────────────────────────────
 
 check_deps() {
@@ -399,11 +429,12 @@ build_kernel() {
     cd "$kernel_dir"
 
     info "Building kernel (bzImage) with $FLOW_MAKE_JOBS parallel jobs ..."
-    make -j"$FLOW_MAKE_JOBS" "$bzimage_target" 2>&1 || die "Kernel build (bzImage) failed"
+    info "This usually takes 10\u201330 minutes. The log below updates in real-time."
+    nohup_run "build-bzImage.log" make -j"$FLOW_MAKE_JOBS" "$bzimage_target"
     info "bzImage built successfully"
 
-    info "Building kernel modules ..."
-    make -j"$FLOW_MAKE_JOBS" modules 2>&1 || die "Kernel modules build failed"
+    info "Building kernel modules (may take 5\u201315 minutes) ..."
+    nohup_run "build-modules.log" make -j"$FLOW_MAKE_JOBS" modules
     info "Modules built successfully"
 }
 
