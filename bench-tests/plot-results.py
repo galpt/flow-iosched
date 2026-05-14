@@ -11,6 +11,7 @@
 
 import csv
 import os
+import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -18,6 +19,13 @@ import numpy as np
 
 RESULTS = "results"
 CHARTS = "charts"
+
+CSV_PATH = os.path.join(RESULTS, "summary.csv")
+if not os.path.isfile(CSV_PATH):
+    print(f"ERROR: Results file not found at {CSV_PATH}", file=sys.stderr)
+    print("Run run-benchmarks.sh first to generate benchmark data.", file=sys.stderr)
+    sys.exit(1)
+
 os.makedirs(CHARTS, exist_ok=True)
 
 # ── Color palette matching scx_flow benchmark style ───────────────────
@@ -33,7 +41,7 @@ FALLBACK_COLORS = list(COLOR_BY_SCHED.values())
 
 # ── Read data ─────────────────────────────────────────────────────────
 rows = []
-with open(f"{RESULTS}/summary.csv") as f:
+with open(CSV_PATH) as f:
     reader = csv.DictReader(f)
     for row in reader:
         try:
@@ -46,6 +54,10 @@ with open(f"{RESULTS}/summary.csv") as f:
         rows.append(row)
 
 schedulers = sorted(set(r["scheduler"] for r in rows))
+if not schedulers:
+    print("ERROR: No valid benchmark data found in summary.csv", file=sys.stderr)
+    print("Check that run-benchmarks.sh completed successfully.", file=sys.stderr)
+    sys.exit(1)
 workloads = ["randread_4k", "randwrite_4k", "seqread_128k", "seqwrite_128k", "mixed_70_30"]
 wl_labels = ["Rand Read\n4k", "Rand Write\n4k", "Seq Read\n128k", "Seq Write\n128k", "Mixed\n70/30"]
 
@@ -199,7 +211,9 @@ for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
     ax.set_yticklabels(sorted_scheds, fontsize=8)
     dir_label = "higher is better" if direction == "higher" else "lower is better"
     ax.set_title(f"{title}\n({dir_label})", fontsize=10)
-    ax.set_xlim(left=0)  # ensure bars always visible
+    # Ensure bars always visible: start from 0, with minimum right margin
+    max_val = max(sorted_vals) if sorted_vals else 1
+    ax.set_xlim(left=0, right=max_val * 1.2 or 1)
     ax.grid(axis="x", alpha=0.3)
     annotate_bars(ax, bars, sorted_vals, pad_ratio=0.01)
 
