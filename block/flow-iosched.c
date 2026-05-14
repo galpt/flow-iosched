@@ -70,7 +70,7 @@ enum flow_optype {
 #define FLOW_BUDGET_SECTORS_DEFAULT_SYNC	2048
 #define FLOW_BUDGET_SECTORS_DEFAULT_ASYNC	512
 #define FLOW_BATCH_MAX_READ_DEFAULT		16
-#define FLOW_BATCH_MAX_WRITE_DEFAULT		32
+#define FLOW_BATCH_MAX_WRITE_DEFAULT		16
 #define FLOW_COMPLETION_WINDOW_NS_DEFAULT	8000000ULL
 #define FLOW_MAX_INSERTS_PER_LOCK		72
 #define FLOW_MAX_DELETES_PER_LOCK		24
@@ -80,7 +80,7 @@ enum flow_optype {
 #define FLOW_SCORE_DECAY_PER_REFILL		1U
 
 /* ── Shared queue depth throttle ratio ────────────────────────────── */
-#define FLOW_ASYNC_DEPTH_RATIO			8  /* 1/8th of nr_requests */
+#define FLOW_ASYNC_DEPTH_RATIO			3
 
 /* ── Per-request scheduler data ───────────────────────────────────── */
 struct flow_rq_data {
