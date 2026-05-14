@@ -46,7 +46,8 @@ bench() {
         --runtime="$RUNTIME" \
         --time_based=1 \
         --output-format=json \
-        > "$out" 2>/dev/null
+        --status-interval=1 \
+        > "$out"
 }
 
 # Header
