@@ -306,17 +306,18 @@ apply_patches() {
         patch_name="$(basename "$patch")"
         info "Applying $patch_name ..."
 
-        # Try git am first, fall back to patch -p1
-        if git apply --check "$patch" 2>/dev/null; then
+        # Use git am only if the kernel tree is a git repo (preserves metadata).
+        # For tarball-extracted sources (no .git), use patch -p1 directly.
+        if git rev-parse --git-dir &>/dev/null && git apply --check "$patch" 2>/dev/null; then
             git am "$patch" 2>/dev/null || {
                 git am --abort 2>/dev/null || true
                 # Fallback: apply with patch
-                patch -p1 < "$patch" 2>/dev/null || {
+                patch -p1 -r - < "$patch" 2>/dev/null || {
                     die "Failed to apply $patch_name"
                 }
             }
         else
-            patch -p1 < "$patch" 2>/dev/null || {
+            patch -p1 -r - < "$patch" 2>/dev/null || {
                 die "Failed to apply $patch_name"
             }
         fi
