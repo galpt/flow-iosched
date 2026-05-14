@@ -25,6 +25,10 @@ lane is abandoned entirely.
 
 ## Design
 
+<p align="center">
+  <img src="docs/architecture.png" alt="flow-iosched architecture diagram" width="720">
+</p>
+
 Each request is classified into a lane at insertion time based on its
 `cmd_flags` (sync, meta, flush, priority) and the originating process's I/O
 budget balance.  Per-lane deadline-sorted red-black trees (plus two FIFO
