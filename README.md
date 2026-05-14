@@ -39,6 +39,12 @@ flow_assign_lane() inspects:
 cmd_flags, is_write, budget, AT_HEAD
 assigns lane 1-5 + deadline"]
 
+    N3["3. Five Priority Lanes
+
+Emergency -> Reserved -> Latency
+-> Shared -> Contained
+(deadline-sorted rbtrees per lane)"]
+
     C1["Emergency
 
 AT_HEAD bypass
@@ -98,11 +104,12 @@ prevents use-after-free
 NULL-guarded at all sites"]
 
     A1 --> B1
-    B1 --> C1
-    B1 --> D1
-    B1 --> E1
-    B1 --> F1
-    B1 --> G1
+    B1 --> N3
+    N3 --> C1
+    N3 --> D1
+    N3 --> E1
+    N3 --> F1
+    N3 --> G1
     C1 --> H1
     D1 --> H1
     E1 --> H1
@@ -111,7 +118,7 @@ NULL-guarded at all sites"]
     H1 --> I1
 
     B1 -.-> J1
-    J1 -.-> G1
+    J1 -.-> N3
     C1 -.-> K1
     D1 -.-> K1
     E1 -.-> K1
@@ -120,18 +127,19 @@ NULL-guarded at all sites"]
     K1 -.-> H1
     L1 -.-> J1
 
-    style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2
-    style B1 fill:#fff,stroke:#94a3b8,stroke-width:2
-    style C1 fill:#fff,stroke:#dc2626,stroke-width:2
-    style D1 fill:#fff,stroke:#2563eb,stroke-width:2
-    style E1 fill:#fff,stroke:#16a34a,stroke-width:2
-    style F1 fill:#fff,stroke:#d97706,stroke-width:2
-    style G1 fill:#fff,stroke:#9333ea,stroke-width:2
-    style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2
-    style I1 fill:#fef2f2,stroke:#ef4444,stroke-width:2
-    style J1 fill:#faf5ff,stroke:#a855f7,stroke-width:2
-    style K1 fill:#fff7ed,stroke:#f59e0b,stroke-width:2
-    style L1 fill:#f0fdf4,stroke:#22c55e,stroke-width:2
+    style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2,color:#1e293b
+    style B1 fill:#fff,stroke:#94a3b8,stroke-width:2,color:#1e293b
+    style N3 fill:#fff,stroke:#64748b,stroke-width:2,color:#1e293b
+    style C1 fill:#fff,stroke:#dc2626,stroke-width:2,color:#1e293b
+    style D1 fill:#fff,stroke:#2563eb,stroke-width:2,color:#1e293b
+    style E1 fill:#fff,stroke:#16a34a,stroke-width:2,color:#1e293b
+    style F1 fill:#fff,stroke:#d97706,stroke-width:2,color:#1e293b
+    style G1 fill:#fff,stroke:#9333ea,stroke-width:2,color:#1e293b
+    style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2,color:#1e293b
+    style I1 fill:#fef2f2,stroke:#ef4444,stroke-width:2,color:#1e293b
+    style J1 fill:#faf5ff,stroke:#a855f7,stroke-width:2,color:#1e293b
+    style K1 fill:#fff7ed,stroke:#f59e0b,stroke-width:2,color:#1e293b
+    style L1 fill:#f0fdf4,stroke:#22c55e,stroke-width:2,color:#1e293b
 ```
 
 Each request is classified into a lane at insertion time based on its
