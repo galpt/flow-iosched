@@ -8,7 +8,7 @@
 #
 # Examples:
 #   ./build-kernel.sh 7.0.5    # Build upstream 7.0.5 with flow-iosched
-#   ./build-kernel.sh 6.18     # Build upstream 6.18
+#   ./build-kernel.sh 6.18     # Build upstream 6.18 with flow-iosched
 #   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
 #
 # Supported kernel ranges:
