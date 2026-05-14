@@ -202,7 +202,7 @@ installs them to `/boot` with a unique name, and creates a Limine boot entry.
 
 The script:
 1. Downloads the kernel tarball from `cdn.kernel.org` and caches it in
-   `~/.cache/flow-iosched/kernels/`
+   `./tmp/kernels/` (relative to the script)
 2. Extracts the source (skipped if already present)
 3. Clones the flow-iosched repo for patches if no local `patches/` directory
    is found — no need to download the repo manually
