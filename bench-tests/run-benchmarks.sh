@@ -90,6 +90,9 @@ if [ -z "$SCHEDULERS" ]; then
     done
     SCHEDULERS="${SCHEDULERS# }"
 fi
+# Auto-load flow-iosched module if available (harmless if built-in or absent)
+sudo modprobe flow-iosched 2>/dev/null || true
+
 echo "Schedulers: $SCHEDULERS"
 echo ""
 
