@@ -610,11 +610,12 @@ setup_limine_entry() {
         info "Creating new Limine configuration at $limine_conf"
     fi
 
-    # Escape dots in titles for sed regex safety (e.g. "7.0.5" -> "7\.0\.5")
+    # Escape dots and forward slashes in titles for sed regex safety
+    # (e.g. "Flow I/O Scheduler (7.0.5)" -> "Flow I\/O Scheduler (7\.0\.5)")
     local escaped_title
-    escaped_title="$(printf '%s\n' "$entry_title" | sed 's/\./\\./g')"
+    escaped_title="$(printf '%s\n' "$entry_title" | sed 's/[.\/]/\\&/g')"
     local escaped_fallback
-    escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/\./\\./g')"
+    escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/[.\/]/\\&/g')"
 
     # Remove any existing entry with the same title (from previous runs)
     if grep -qF "/$entry_title" "$limine_conf" 2>/dev/null; then
