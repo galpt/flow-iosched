@@ -495,6 +495,42 @@ install_kernel() {
     info "Installing kernel modules ..."
     make modules_install 2>&1 || die "Failed to install modules"
 
+    # ── Update module dependencies ────────────────────────────────
+    info "Updating module dependencies ..."
+    depmod -a 2>&1 || warn "depmod failed. modprobe may not find the module."
+
+    # ── Verify module is installed ────────────────────────────────
+    info "Verifying flow-iosched module installation ..."
+    local mod_path
+    mod_path=$(find /lib/modules -maxdepth 3 -name "flow-iosched.ko" 2>/dev/null | head -1)
+    if [ -z "$mod_path" ]; then
+        warn "flow-iosched.ko not found in any /lib/modules/ directory."
+        warn "The scheduler module was not installed. Check build output above."
+    else
+        info "  Module installed: ${mod_path}"
+        # Try to load the module on the current system (best-effort).
+        # This works when the build and target kernels match.
+        if [ "${mod_path#/lib/modules/}" != "${mod_path}" ]; then
+            local mod_ver="${mod_path#/lib/modules/}"
+            mod_ver="${mod_ver%%/*}"
+            if [ "$mod_ver" = "$(uname -r)" ]; then
+                info "  Module version matches running kernel. Attempting load ..."
+                depmod -a 2>/dev/null || true
+                modprobe flow-iosched 2>/dev/null && {
+                    sleep 1
+                    if grep -q "flow-iosched" /sys/block/*/queue/scheduler 2>/dev/null; then
+                        info "  flow-iosched is now available in /sys/block/*/queue/scheduler"
+                    else
+                        warn "  Module loaded but not listed in sysfs. Check dmesg for errors."
+                    fi
+                } || warn "  Could not load module. After reboot, run: sudo modprobe flow-iosched"
+            else
+                info "  Module built for kernel ${mod_ver}, running $(uname -r)."
+                info "  After booting the target kernel, run: sudo modprobe flow-iosched"
+            fi
+        fi
+    fi
+
     # ── Install kernel image ──────────────────────────────────────
     local bzimage_src="arch/x86/boot/bzImage"
     if [ ! -f "$bzimage_src" ]; then
