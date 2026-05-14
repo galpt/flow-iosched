@@ -115,6 +115,13 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 
 ## Production Ready?
 
+> [!WARNING]
+> flow-iosched has not yet undergone extensive real-world testing and should
+> not be assumed stable for use on critical systems. If you choose to evaluate
+> it, do so on a virtual machine or a spare PC/laptop — not your primary
+> workstation. Unforeseen side effects, including data corruption or system
+> instability, are possible at this stage.
+
 For general-purpose desktop and workstation use on SATA SSDs, single-queue
 NVMe, and mid-range multi-queue NVMe (up to approximately 8 hardware queues),
 yes.
