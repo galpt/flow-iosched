@@ -29,79 +29,100 @@ lane is abandoned entirely.
 flowchart TB
     A1["1. I/O Request
 
-Bio arrives from blk-mq
-flow_prepare_request allocs
-flow_rq_data from mempool"]
+A bio arrives from the blk-mq layer.
+flow_prepare_request() allocates a
+flow_rq_data struct from the mempool."]
 
     B1["2. Lane Classification
 
-flow_assign_lane() inspects:
-cmd_flags, is_write, budget, AT_HEAD
-assigns lane 1-5 + deadline"]
+flow_assign_lane() inspects the request's
+cmd_flags (sync, meta, flush, priority),
+is_write, blk_rq_bytes, the per-process
+budget, and insert_flags (AT_HEAD).
+Returns a lane number (1-5) and deadline."]
 
     N3["3. Five Priority Lanes
 
-Emergency -> Reserved -> Latency
--> Shared -> Contained
-(deadline-sorted rbtrees per lane)"]
+Dispatch walks lanes in priority order:
+Emergency > Reserved > Latency > Shared
+> Contained. Each lane has its own
+deadline-sorted rbtree (rb_root_cached)."]
 
     C1["Emergency
 
-AT_HEAD bypass
-FIFO, prio_queue[0]"]
+BLK_MQ_INSERT_AT_HEAD bypass.
+Queued in prio_queue[0] for immediate,
+unconditional dispatch. No rbtree."]
 
     D1["Reserved
 
-Sync reads + metadata/prio
-2048 sector budget"]
+Synchronous reads, REQ_META, and
+REQ_PRIO. Budget: 2048 sectors.
+Deadline = start_time_ns (FIFO order)."]
 
     E1["Latency
 
-REQ_SYNC writes, <= 4 KB
-2 ms deadline offset"]
+REQ_SYNC writes and small I/O <= 4 KB.
+Deadline = start_time_ns + 2 ms.
+Budget refills when idle > 100 ms."]
 
     F1["Shared
 
-Async writes, best-effort
-512 sector budget"]
+Async writes and best-effort I/O.
+Budget: 512 sectors. Async depth
+capped at nr_requests / 3."]
 
     G1["Contained
 
-Hog-throttled if score >= 100
-score decays by 8/tick"]
+Processes with containment_score >= 100
+(hog-throttled). Score decays by 8
+on each idle refill tick."]
 
     H1["4. Per-hctx Dispatch
 
-Phase 1 (fast): pop from list
-Phase 2 (slow): refill from rbtrees
-QUEUE_FLAG_SQ_SCHED cleared"]
+flow_dispatch_request(hctx):
+Phase 1 (fast path): pops from
+khd->dispatch_list with only the
+per-hctx lock (no global contention).
+Phase 2 (slow path): refills from
+lane rbtrees under fd->lock, then
+appends to the dispatch list.
+QUEUE_FLAG_SQ_SCHED is cleared."]
 
     I1["5. Device
 
-NVMe / SATA"]
+NVMe, SATA, or virtual device.
+Multiple hardware queues."]
 
     J1["Budget & Containment
 
-flow_icq_data via icq_size
-1. refill if idle > 100 ms
-2. deduct sectors
-3. if budget < 0 -> score +10
-4. if score >= 100 -> demote
-5. idle refill -> score -= 8"]
+Per-process flow_icq_data via icq_size.
+Tracks io_budget_sectors. On insert:
+refill budget and decay score if idle
+> 100 ms, then deduct sectors from
+budget. If budget < 0, containment_score
++= 10. If score >= 100, demote to the
+Contained lane. Idle refill also
+decays containment_score by 8."]
 
     K1["Starvation Tracking
 
-per-hctx starvation_rounds[5]
-round++ on each bypass
-rounds >= max -> force-dispatch
-defaults: 5, 20, 30"]
+Per-hctx starvation_rounds[5] array.
+Each time dispatch skips a lane, its
+round counter increments. When rounds
+>= starvation_max[lane], force-dispatch
+from that lane and reset the counter.
+Default thresholds: Reserved = 5,
+Shared = 20, Contained = 30."]
 
     L1["ICQ Lifecycle
 
-flow_init_icq: zero-init data
-flow_exit_icq: memset to zero
-prevents use-after-free
-NULL-guarded at all sites"]
+flow_init_icq() zero-initialises
+flow_icq_data and sets timestamps.
+flow_exit_icq() memsets data to zero
+on teardown, preventing use-after-free.
+Both are NULL-guarded. Wired via
+.init_icq / .exit_icq elevator ops."]
 
     A1 --> B1
     B1 --> N3
@@ -118,7 +139,7 @@ NULL-guarded at all sites"]
     H1 --> I1
 
     B1 -.-> J1
-    J1 -.-> N3
+    J1 -.-> G1
     C1 -.-> K1
     D1 -.-> K1
     E1 -.-> K1
