@@ -93,15 +93,16 @@ echo "Device:   $DEVICE_LABEL"
 echo "Runtime:  ${RUNTIME}s per test"
 echo ""
 
-# Auto-load flow-iosched module if available on disk (done before sysfs scan)
-FLOW_IOSCHED_LOADED=false
-if modinfo -n flow-iosched &>/dev/null; then
-    if ! lsmod 2>/dev/null | grep -q "^flow_iosched "; then
-        echo "  flow-iosched module found — loading..."
-        sudo modprobe flow-iosched 2>/dev/null && FLOW_IOSCHED_LOADED=true || \
-            echo "  flow-iosched: modprobe failed (module may need rebuilding for kernel $(uname -r))"
-    else
-        FLOW_IOSCHED_LOADED=true
+# Check if flow-iosched is already available (built into kernel).
+# If not, try to load it as a module — but skip if a stale module file
+# from a different kernel build would conflict with the built-in version.
+if ! grep -qw "flow-iosched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
+    if modinfo -n flow-iosched &>/dev/null; then
+        if ! lsmod 2>/dev/null | grep -q "^flow_iosched "; then
+            echo "  Loading flow-iosched module..."
+            sudo modprobe flow-iosched 2>/dev/null || \
+                echo "  flow-iosched: modprobe failed (module may need rebuilding)"
+        fi
     fi
 fi
 
@@ -114,14 +115,6 @@ if [ -z "$SCHEDULERS" ]; then
         fi
     done
     SCHEDULERS="${SCHEDULERS# }"
-fi
-if [ "$FLOW_IOSCHED_LOADED" = true ]; then
-    if grep -qw "flow-iosched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
-        echo "  flow-iosched: available"
-    else
-        echo "  flow-iosched: module loaded but not registered as elevator for $DEVICE"
-        echo "  (module was built for a different kernel version)"
-    fi
 fi
 
 echo "Schedulers: $SCHEDULERS"
