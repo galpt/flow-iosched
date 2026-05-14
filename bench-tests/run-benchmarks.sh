@@ -58,8 +58,7 @@ bench() {
         --runtime="$RUNTIME" \
         --time_based=1 \
         --output-format=json \
-        --status-interval=1 \
-        > "$out"
+        --output="$out"
 }
 
 # Header
@@ -84,10 +83,43 @@ for sched in $SCHEDULERS; do
         f="$RESULTS_DIR/${sched}_${wl}.json"
         [ -f "$f" ] || continue
 
-        read_iops=$(python3 -c "import json; d=json.load(open('$f')); print(d['jobs'][0]['read']['iops'])")
-        write_iops=$(python3 -c "import json; d=json.load(open('$f')); print(d['jobs'][0]['write']['iops'])")
-        read_lat=$(python3 -c "import json; d=json.load(open('$f')); print(d['jobs'][0]['read']['lat_ns']['mean'] / 1000)")
-        write_lat=$(python3 -c "import json; d=json.load(open('$f')); print(d['jobs'][0]['write']['lat_ns']['mean'] / 1000)")
+        read_iops=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$f'))
+    print(d['jobs'][0]['read']['iops'])
+except Exception:
+    sys.exit(1)" 2>/dev/null) || {
+            echo "  [${sched}] WARNING: failed to extract iops from $f — skipping" >&2
+            continue
+        }
+        write_iops=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$f'))
+    print(d['jobs'][0]['write']['iops'])
+except Exception:
+    sys.exit(1)" 2>/dev/null) || {
+            continue
+        }
+        read_lat=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$f'))
+    print(d['jobs'][0]['read']['lat_ns']['mean'] / 1000)
+except Exception:
+    sys.exit(1)" 2>/dev/null) || {
+            continue
+        }
+        write_lat=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$f'))
+    print(d['jobs'][0]['write']['lat_ns']['mean'] / 1000)
+except Exception:
+    sys.exit(1)" 2>/dev/null) || {
+            continue
+        }
 
         echo "$sched,$wl,$read_iops,$write_iops,$read_lat,$write_lat" \
             >> "$RESULTS_DIR/summary.csv"
