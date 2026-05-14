@@ -48,7 +48,7 @@ contained lane until the score decays below the threshold again.
 ## Kernel Compatibility
 
 | Kernel range | Notes |
-|---|---|---|
+|---|---|
 | 7.0.x (CachyOS) | Default target — use source as-is.  (CachyOS ships `MQ_IOSCHED_ADIOS` which uses the same elevator API.) |
 | 6.18 – 6.19 | Same init_sched API as 7.x — use source as-is. |
 | 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after applying `patches/0001-linux7.0-flow-iosched-v1.1.0.patch`. |
