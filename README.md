@@ -26,65 +26,112 @@ lane is abandoned entirely.
 ## Design
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'background': 'transparent'}}}%%
-flowchart TD
-    subgraph Pipeline["Pipeline"]
-        direction LR
-        A["1. I/O Request&lt;br&gt;&lt;small&gt;Bio arrives from blk-mq&lt;br&gt;flow_prepare_request allocs&lt;br&gt;flow_rq_data from mempool&lt;/small&gt;"]
-        B["2. Lane Classification&lt;br&gt;&lt;small&gt;flow_assign_lane() inspects:&lt;br&gt;cmd_flags, is_write, budget, AT_HEAD&lt;br&gt;→ assigns lane 1–5 + deadline&lt;/small&gt;"]
-        C["Emergency&lt;br&gt;&lt;small&gt;AT_HEAD bypass&lt;br&gt;FIFO, prio_queue[0]&lt;/small&gt;"]
-        D["Reserved&lt;br&gt;&lt;small&gt;Sync reads + metadata/prio&lt;br&gt;2048 sector budget&lt;/small&gt;"]
-        E["Latency&lt;br&gt;&lt;small&gt;REQ_SYNC writes, ≤ 4 KB&lt;br&gt;2 ms deadline offset&lt;/small&gt;"]
-        F["Shared&lt;br&gt;&lt;small&gt;Async writes, best-effort&lt;br&gt;512 sector budget&lt;/small&gt;"]
-        G["Contained&lt;br&gt;&lt;small&gt;Hog-throttled if score ≥ 100&lt;br&gt;score −8 per idle tick&lt;/small&gt;"]
-        H["4. Per-hctx Dispatch&lt;br&gt;&lt;small&gt;Phase 1 (fast): pop from list&lt;br&gt;Phase 2 (slow): refill from rbtrees&lt;br&gt;QUEUE_FLAG_SQ_SCHED cleared&lt;/small&gt;"]
-        I("5. Device&lt;br&gt;&lt;small&gt;NVMe / SATA&lt;/small&gt;")
+flowchart TB
+    A1["1. I/O Request
 
-        A -->|main flow| B
-        B -->|lane 1| C
-        B -->|lane 2| D
-        B -->|lane 3| E
-        B -->|lane 4| F
-        B -->|lane 5| G
-        C -->|dispatch| H
-        D -->|dispatch| H
-        E -->|dispatch| H
-        F -->|dispatch| H
-        G -->|dispatch| H
-        H -->|I/O completion| I
-    end
+Bio arrives from blk-mq
+flow_prepare_request allocs
+flow_rq_data from mempool"]
 
-    subgraph Support["Supporting Systems"]
-        direction LR
-        J["Budget &amp; Containment&lt;br&gt;&lt;small&gt;flow_icq_data via icq_size&lt;br&gt;1. refill if idle &gt; 100 ms&lt;br&gt;2. deduct sectors&lt;br&gt;3. if budget &lt; 0 → score +10&lt;br&gt;4. if score ≥ 100 → demote&lt;br&gt;5. idle refill → score −= 8&lt;/small&gt;"]
-        K["Starvation Tracking&lt;br&gt;&lt;small&gt;per-hctx starvation_rounds[5]&lt;br&gt;round++ on each bypass&lt;br&gt;rounds ≥ max → force-dispatch&lt;br&gt;defaults: 5, 20, 30&lt;/small&gt;"]
-        L["ICQ Lifecycle&lt;br&gt;&lt;small&gt;flow_init_icq: zero-init data&lt;br&gt;flow_exit_icq: memset to zero&lt;br&gt;prevents use-after-free&lt;br&gt;NULL-guarded at all sites&lt;/small&gt;"]
-    end
+    B1["2. Lane Classification
 
-    B -.->|budget check| J
-    J -.->|demote| G
-    C -.->|bypass tracking| K
-    D -.->|bypass tracking| K
-    E -.->|bypass tracking| K
-    F -.->|bypass tracking| K
-    G -.->|bypass tracking| K
-    K -.->|force-dispatch| H
-    L -.->|per-process state| J
+flow_assign_lane() inspects:
+cmd_flags, is_write, budget, AT_HEAD
+assigns lane 1-5 + deadline"]
 
-    style A fill:#eef2ff,stroke:#6366f1,stroke-width:2
-    style B fill:#fff,stroke:#94a3b8,stroke-width:2
-    style C fill:#fff,stroke:#dc2626,stroke-width:2
-    style D fill:#fff,stroke:#2563eb,stroke-width:2
-    style E fill:#fff,stroke:#16a34a,stroke-width:2
-    style F fill:#fff,stroke:#d97706,stroke-width:2
-    style G fill:#fff,stroke:#9333ea,stroke-width:2
-    style H fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2
-    style I fill:#fef2f2,stroke:#ef4444,stroke-width:2
-    style J fill:#faf5ff,stroke:#a855f7,stroke-width:2
-    style K fill:#fff7ed,stroke:#f59e0b,stroke-width:2
-    style L fill:#f0fdf4,stroke:#22c55e,stroke-width:2
-    style Pipeline fill:#f8fafc,stroke:#e2e8f0,stroke-dasharray:5
-    style Support fill:#f8fafc,stroke:#e2e8f0,stroke-dasharray:5
+    C1["Emergency
+
+AT_HEAD bypass
+FIFO, prio_queue[0]"]
+
+    D1["Reserved
+
+Sync reads + metadata/prio
+2048 sector budget"]
+
+    E1["Latency
+
+REQ_SYNC writes, <= 4 KB
+2 ms deadline offset"]
+
+    F1["Shared
+
+Async writes, best-effort
+512 sector budget"]
+
+    G1["Contained
+
+Hog-throttled if score >= 100
+score decays by 8/tick"]
+
+    H1["4. Per-hctx Dispatch
+
+Phase 1 (fast): pop from list
+Phase 2 (slow): refill from rbtrees
+QUEUE_FLAG_SQ_SCHED cleared"]
+
+    I1["5. Device
+
+NVMe / SATA"]
+
+    J1["Budget & Containment
+
+flow_icq_data via icq_size
+1. refill if idle > 100 ms
+2. deduct sectors
+3. if budget < 0 -> score +10
+4. if score >= 100 -> demote
+5. idle refill -> score -= 8"]
+
+    K1["Starvation Tracking
+
+per-hctx starvation_rounds[5]
+round++ on each bypass
+rounds >= max -> force-dispatch
+defaults: 5, 20, 30"]
+
+    L1["ICQ Lifecycle
+
+flow_init_icq: zero-init data
+flow_exit_icq: memset to zero
+prevents use-after-free
+NULL-guarded at all sites"]
+
+    A1 --> B1
+    B1 --> C1
+    B1 --> D1
+    B1 --> E1
+    B1 --> F1
+    B1 --> G1
+    C1 --> H1
+    D1 --> H1
+    E1 --> H1
+    F1 --> H1
+    G1 --> H1
+    H1 --> I1
+
+    B1 -.-> J1
+    J1 -.-> G1
+    C1 -.-> K1
+    D1 -.-> K1
+    E1 -.-> K1
+    F1 -.-> K1
+    G1 -.-> K1
+    K1 -.-> H1
+    L1 -.-> J1
+
+    style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2
+    style B1 fill:#fff,stroke:#94a3b8,stroke-width:2
+    style C1 fill:#fff,stroke:#dc2626,stroke-width:2
+    style D1 fill:#fff,stroke:#2563eb,stroke-width:2
+    style E1 fill:#fff,stroke:#16a34a,stroke-width:2
+    style F1 fill:#fff,stroke:#d97706,stroke-width:2
+    style G1 fill:#fff,stroke:#9333ea,stroke-width:2
+    style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2
+    style I1 fill:#fef2f2,stroke:#ef4444,stroke-width:2
+    style J1 fill:#faf5ff,stroke:#a855f7,stroke-width:2
+    style K1 fill:#fff7ed,stroke:#f59e0b,stroke-width:2
+    style L1 fill:#f0fdf4,stroke:#22c55e,stroke-width:2
 ```
 
 Each request is classified into a lane at insertion time based on its
