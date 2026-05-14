@@ -26,6 +26,7 @@ lane is abandoned entirely.
 ## Design
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'background': 'transparent'}}}%%
 flowchart TD
     subgraph Pipeline["Pipeline"]
         direction LR
