@@ -320,6 +320,7 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 	struct dl_group *dlg;
 	u64 deadline;
 
+	lockdep_assert_held(&fd->lock);
 	if (!root || !rd)
 		return;
 
@@ -365,6 +366,7 @@ static void flow_del_from_dl_tree(struct flow_data *fd, u8 lane,
 	struct flow_rq_data *rd = get_rq_data(rq);
 	struct dl_group *dlg;
 
+	lockdep_assert_held(&fd->lock);
 	if (!root || !rd || !rd->dl_group || list_empty(&rd->dl_node))
 		return;
 
@@ -436,6 +438,7 @@ static void flow_remove_request(struct flow_data *fd, struct request *rq,
 {
 	struct flow_rq_data *rd = get_rq_data(rq);
 
+	lockdep_assert_held(&fd->lock);
 	/* NULL priv[0] guard — prepare_request may have failed. */
 	if (rd) {
 		if (!list_empty(&rd->dl_node))
@@ -464,6 +467,7 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	u8 lane;
 	bool contained = false;
 
+	lockdep_assert_held(&fd->lock);
 	/* guard against NULL priv[0] when mempool_alloc fails in prepare_request */
 	if (!rd)
 		return;
@@ -563,10 +567,35 @@ static void flow_finish_request(struct request *rq)
 	}
 }
 
+/* ── io_cq lifecycle ──────────────────────────────────────────── */
+
+static void flow_init_icq(struct io_cq *icq)
+{
+	struct flow_icq_data *ficq = icq_to_flow_icq(icq);
+
+	if (!ficq)
+		return;
+
+	memset(ficq, 0, sizeof(*ficq));
+	ficq->last_io_completed = ktime_get_ns();
+	ficq->last_io_inserted = ktime_get_ns();
+}
+
+static void flow_exit_icq(struct io_cq *icq)
+{
+	struct flow_icq_data *ficq = icq_to_flow_icq(icq);
+
+	if (!ficq)
+		return;
+
+	memset(ficq, 0, sizeof(*ficq));
+}
+
 /* ── Batch queue management ───────────────────────────────────────── */
 
 static inline u8 flow_starved_lane(struct flow_data *fd)
 {
+	lockdep_assert_held(&fd->lock);
 	/* Check lanes that have exceeded their starvation threshold */
 	for (u8 lane = FLOW_LANE_CONTAINED; lane > FLOW_LANE_EMERGENCY; lane--) {
 		if (fd->starvation_max[lane] &&
@@ -668,6 +697,7 @@ static bool flow_fill_batch_locked(struct flow_data *fd)
 
 static void flow_flip_batch_page(struct flow_data *fd)
 {
+	lockdep_assert_held(&fd->lock);
 	fd->active_batch_page = !fd->active_batch_page;
 }
 
@@ -677,6 +707,7 @@ static struct request *flow_pop_from_batch(struct flow_data *fd, int page,
 	struct list_head *q = &fd->batch_pages[page][optype];
 	struct request *rq;
 
+	lockdep_assert_held(&fd->lock);
 	rq = list_first_entry_or_null(q, struct request, queuelist);
 	if (rq) {
 		list_del_init(&rq->queuelist);
@@ -692,6 +723,7 @@ static struct request *flow_dispatch_from_prio(struct flow_data *fd)
 {
 	struct request *rq;
 
+	lockdep_assert_held(&fd->lock);
 	/* prio_queue[0] is highest priority (Emergency) */
 	if (!list_empty(&fd->prio_queue[0])) {
 		rq = list_first_entry(&fd->prio_queue[0], struct request,
@@ -1182,6 +1214,8 @@ static struct elevator_type mq_flow = {
 		.has_work		= flow_has_work,
 		.init_sched		= flow_init_sched,
 		.exit_sched		= flow_exit_sched,
+		.init_icq		= flow_init_icq,
+		.exit_icq		= flow_exit_icq,
 	},
 	.elevator_attrs	= flow_sched_attrs,
 	.elevator_name	= "flow-iosched",
