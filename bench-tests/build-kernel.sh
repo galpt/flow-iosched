@@ -381,54 +381,73 @@ apply_patches() {
 
 configure_kernel() {
     local kernel_dir="$1"
+    local log_file="configure-kernel.log"
 
     cd "$kernel_dir"
+    rm -f "$log_file"
 
-    # Use the running kernel's config as base (best-effort)
+    info "Configuring kernel ..."
+    info "Configuration log: $(pwd)/${log_file}"
+
+    # ── Step 1: Base config ──────────────────────────────────────
     if [ -f /proc/config.gz ]; then
-        info "Using running kernel's configuration as base ..."
-        zcat /proc/config.gz > .config
+        info "  Base config: /proc/config.gz"
+        zcat /proc/config.gz > .config 2>>"$log_file" || {
+            die "Failed to read /proc/config.gz (see $log_file)"
+        }
+        echo "OK: base config from /proc/config.gz ($(wc -l < .config) lines)" >> "$log_file"
     elif [ -f "/lib/modules/$(uname -r)/build/.config" ]; then
-        info "Using /lib/modules/$(uname -r)/build/.config as base ..."
-        cp "/lib/modules/$(uname -r)/build/.config" .config
+        info "  Base config: /lib/modules/$(uname -r)/build/.config"
+        cp "/lib/modules/$(uname -r)/build/.config" .config 2>>"$log_file" || {
+            die "Failed to copy base config (see $log_file)"
+        }
     else
-        warn "No running kernel config found. Using default config."
+        warn "No running kernel config found. Kernel config defaults will be used."
+        echo "WARN: no base config, using defaults" >> "$log_file"
     fi
 
-    # Update to match this kernel version's options
-    make olddefconfig 2>&1 || die "'make olddefconfig' failed"
+    # ── Step 2: olddefconfig ──────────────────────────────────────
+    info "  Running make olddefconfig (this may take up to 60 seconds) ..."
+    make olddefconfig >> "$log_file" 2>&1 || {
+        die "'make olddefconfig' failed. See $(pwd)/${log_file} for details."
+    }
 
-    # Enable the flow-iosched scheduler
+    # ── Step 3: Enable flow-iosched scheduler ─────────────────────
+    info "  Enabling CONFIG_MQ_IOSCHED_FLOW ..."
     if grep -q "CONFIG_MQ_IOSCHED_FLOW" .config 2>/dev/null; then
-        # Config option already exists (from patch), enable it
-        ./scripts/config --enable CONFIG_MQ_IOSCHED_FLOW || {
-            warn "Could not enable CONFIG_MQ_IOSCHED_FLOW via scripts/config"
-            # Fallback: sed the config directly
+        ./scripts/config --enable CONFIG_MQ_IOSCHED_FLOW 2>>"$log_file" || {
+            warn "Could not enable CONFIG_MQ_IOSCHED_FLOW via scripts/config, using sed fallback"
             sed -i 's/# CONFIG_MQ_IOSCHED_FLOW is not set/CONFIG_MQ_IOSCHED_FLOW=m/' .config
         }
     else
-        # Config option doesn't exist yet — patch may not have applied. Bail out.
         die "CONFIG_MQ_IOSCHED_FLOW not found in .config. Did the patch apply correctly?"
     fi
 
-    # Refresh dependencies for the new option
-    make olddefconfig 2>&1 || die "'make olddefconfig' failed after enabling flow-iosched"
+    # ── Step 4: Refresh deps ──────────────────────────────────────
+    info "  Refreshing kernel configuration ..."
+    make olddefconfig >> "$log_file" 2>&1 || {
+        die "'make olddefconfig' failed after enabling flow-iosched. See $log_file"
+    }
 
-    # Verify the option is now enabled
+    # ── Step 5: Verify ────────────────────────────────────────────
     if ! grep -q "^CONFIG_MQ_IOSCHED_FLOW=" .config; then
         die "CONFIG_MQ_IOSCHED_FLOW is not set after configuration. Something went wrong."
     fi
+    info "  CONFIG_MQ_IOSCHED_FLOW: $(grep '^CONFIG_MQ_IOSCHED_FLOW=' .config)"
 
-    # Set a unique local version string so this kernel's modules live in
-    # /lib/modules/<version>-flow/ instead of /lib/modules/<version>/.
-    # This prevents conflicts with the distribution kernel at the same
-    # version and ensures remove-kernel.sh can safely clean up modules.
-    ./scripts/config --set-str CONFIG_LOCALVERSION "-flow" || {
-        warn "Could not set CONFIG_LOCALVERSION via scripts/config"
+    # ── Step 6: Set LOCALVERSION to -flow ─────────────────────────
+    info "  Setting LOCALVERSION=-flow ..."
+    ./scripts/config --set-str CONFIG_LOCALVERSION "-flow" 2>>"$log_file" || {
+        warn "Could not set CONFIG_LOCALVERSION via scripts/config, using sed fallback"
         sed -i '/^CONFIG_LOCALVERSION=/d' .config
         echo 'CONFIG_LOCALVERSION="-flow"' >> .config
     }
-    make olddefconfig 2>&1 || die "'make olddefconfig' failed after setting LOCALVERSION"
+    make olddefconfig >> "$log_file" 2>&1 || {
+        die "'make olddefconfig' failed after setting LOCALVERSION. See $log_file"
+    }
+    info "  LOCALVERSION: $(grep '^CONFIG_LOCALVERSION=' .config)"
+
+    info "Configuration complete."
 }
 
 # ── Build ─────────────────────────────────────────────────────────────
