@@ -360,16 +360,24 @@ apply_patches() {
 
     cd "$kernel_dir"
 
+    # Skip patching if the scheduler source is already present
+    # (from a previous run).  This makes re-runs idempotent.
+    if [ -f "block/flow-iosched.c" ]; then
+        info "flow-iosched.c already present — patches already applied, skipping."
+        return 0
+    fi
+
     for patch in "${patches_to_apply[@]}"; do
         local patch_name
         patch_name="$(basename "$patch")"
         info "Applying $patch_name ..."
 
-        # Apply with patch -p1.  We do not use git am because the kernel
+        # Apply with patch -p1 -N (--forward ignores already-applied patches
+        # instead of prompting).  We do not use git am because the kernel
         # source is typically extracted from a kernel.org tarball (no .git),
         # and git am prompts interactively when applied to a tree that has
         # a git repository in a parent directory.
-        patch -p1 -r - < "$patch" 2>/dev/null || {
+        patch -p1 -N -r - < "$patch" 2>/dev/null || {
             die "Failed to apply $patch_name"
         }
         ((++applied))
