@@ -127,11 +127,11 @@ remove_version() {
         local entry_title="Flow I/O Scheduler (${version})"
         local fallback_title="Flow I/O Scheduler ${version} (fallback)"
 
-        # Escape dots for sed
+        # Escape dots and slashes for sed (the title contains "I/O")
         local escaped_title
-        escaped_title="$(printf '%s\n' "$entry_title" | sed 's/\./\\./g')"
+        escaped_title="$(printf '%s\n' "$entry_title" | sed 's/[.\/]/\\&/g')"
         local escaped_fallback
-        escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/\./\\./g')"
+        escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/[.\/]/\\&/g')"
 
         if grep -qF "/$entry_title" "$limine_conf" 2>/dev/null; then
             sed -i "/^\/$escaped_title/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_title/d; }" "$limine_conf"
