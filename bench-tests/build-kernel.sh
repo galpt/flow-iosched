@@ -418,6 +418,17 @@ configure_kernel() {
     if ! grep -q "^CONFIG_MQ_IOSCHED_FLOW=" .config; then
         die "CONFIG_MQ_IOSCHED_FLOW is not set after configuration. Something went wrong."
     fi
+
+    # Set a unique local version string so this kernel's modules live in
+    # /lib/modules/<version>-flow/ instead of /lib/modules/<version>/.
+    # This prevents conflicts with the distribution kernel at the same
+    # version and ensures remove-kernel.sh can safely clean up modules.
+    ./scripts/config --set-str CONFIG_LOCALVERSION "-flow" || {
+        warn "Could not set CONFIG_LOCALVERSION via scripts/config"
+        sed -i '/^CONFIG_LOCALVERSION=/d' .config
+        echo 'CONFIG_LOCALVERSION="-flow"' >> .config
+    }
+    make olddefconfig 2>&1 || die "'make olddefconfig' failed after setting LOCALVERSION"
 }
 
 # ── Build ─────────────────────────────────────────────────────────────
