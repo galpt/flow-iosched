@@ -368,11 +368,29 @@ The script:
 Runs fio with a set of five workloads and compares the running kernel's
 available I/O schedulers.  Results are written to `results/summary.csv`.
 
+By default the script uses `null_blk`, a RAM-backed virtual block device.
+This is safe for scheduler development — no risk of data corruption —
+and produces representative scheduler-to-scheduler comparisons because
+the scheduler overhead is measured while physical device latency is
+eliminated as a variable.
+
+For real hardware numbers (e.g. to publish IOPS or latency figures),
+point `DEVICE` at a dedicated physical block device with no mounted
+partitions.  The script auto-detects null_blk vs physical and skips the
+mounted-partition guard for null_blk.
+
+> [!NOTE]
+> Scheduler ranking (flow vs mq-deadline vs bfq) tends to be consistent
+> between null_blk and physical hardware.  If flow is 15% faster on
+> null_blk, it will generally be faster on real NVMe too.  The absolute
+> numbers differ — null_blk shows scheduler overhead only, real I/O
+> includes device latency — but the ratios are usefully predictive.
+
 ```bash
-# Run all benchmarks (requires root for scheduler switching)
+# Default: null_blk virtual device (safe, scheduler-overhead comparison)
 sudo ./bench-tests/run-benchmarks.sh
 
-# Specify a different device and runtime
+# Real hardware: dedicated device with no mounted partitions
 DEVICE=/dev/nvme1n1 RUNTIME=60 sudo ./bench-tests/run-benchmarks.sh
 ```
 

@@ -6,13 +6,12 @@
 # Compares flow-iosched against other available schedulers using fio
 # across five workloads.  Results are written to results/ as CSV files.
 #
-# Devices:
-#   DEVICE=/dev/nullb0  — uses null_blk (auto-loaded, virtual RAM device)
-#   DEVICE=/dev/nvme1n1 — real dedicated NVMe drive (no partitions mounted)
-#
-# Usage:
-#   DEVICE=/dev/nullb0 sudo ./bench-tests/run-benchmarks.sh
+# Uses null_blk (virtual RAM device) by default — safe for scheduler
+# comparisons without risking real data.  For real hardware measurements,
+# override DEVICE:
 #   DEVICE=/dev/nvme1n1 sudo ./bench-tests/run-benchmarks.sh
+#
+# See the README for what null_blk numbers mean vs physical devices.
 
 set -euo pipefail
 
@@ -34,14 +33,20 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 # ── Resolve device ────────────────────────────────────────────────────
-DEVICE="${DEVICE:?ERROR: DEVICE must be set (e.g. DEVICE=/dev/nullb0 or DEVICE=/dev/nvme1n1)}"
+# Default to null_blk if not specified (safe for scheduler development)
+DEVICE="${DEVICE:-/dev/nullb0}"
 
 # If using null_blk, auto-load and set up cleanup
 NULLBLK_CLEANUP=false
 if [[ "$DEVICE" == /dev/nullb* ]] || [[ "$DEVICE" == nullb* ]]; then
     DEVICE="/dev/nullb0"
-    echo "Loading null_blk module for synthetic benchmarking..."
-    sudo modprobe null_blk nr_devices=1
+    # Only load if not already present
+    if ! lsblk | grep -q nullb0 2>/dev/null; then
+        echo "Loading null_blk module for synthetic benchmarking..."
+        sudo modprobe null_blk nr_devices=1
+    else
+        echo "null_blk already loaded."
+    fi
     NULLBLK_CLEANUP=true
     # Wait for device to appear
     for i in $(seq 1 10); do
