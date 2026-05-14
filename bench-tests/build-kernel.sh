@@ -1,64 +1,634 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Build a kernel with flow-iosched integrated.
+# build-kernel.sh — Download, patch, build, and install a flow-iosched kernel
 #
 # Usage:
-#   1. Place a matching kernel source tree at the path below.
-#   2. Run this script to apply the patches and build.
+#   ./build-kernel.sh <version>
 #
-# The resulting kernel will have flow-iosched available alongside
-# mq-deadline, kyber, adios, bfq, and none.
-
+# Examples:
+#   ./build-kernel.sh 7.0.5    # Build upstream 7.0.5 with flow-iosched
+#   ./build-kernel.sh 6.18     # Build upstream 6.18
+#   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
+#
+# Supported kernel ranges:
+#   7.0.x         — applies 0001 patch only
+#   6.18 – 6.19   — applies 0001 patch only
+#   6.12 – 6.17   — applies 0001 + 0002 compat patch
+#   5.18 – 6.11   — NOT supported (elevator op API differs)
+#
+# The script:
+#   1. Downloads the kernel tarball from kernel.org (skipped if cached)
+#   2. Extracts sources (skipped if already present)
+#   3. Patches the kernel tree with flow-iosched patches
+#   4. Configures using the running kernel's .config as base
+#   5. Builds bzImage and modules
+#   6. Installs with a unique name (never touches default kernel files)
+#   7. Creates a Limine boot entry with correct BLAKE2b hashes
+#
+# Safety:
+#   - The default kernel (e.g. vmlinuz-linux-cachyos) is never touched
+#   - Boot entry hashes are computed immediately after file install
+#   - A fallback boot entry without hashes is always provided
+#   - Disk space is checked before extraction
+#   - All build tools are verified before starting
+#   - Script phases run without root where possible
 set -euo pipefail
 
-KERNEL_SRC="${KERNEL_SRC:-/usr/src/linux-cachyos}"
-PATCH_DIR="${PATCH_DIR:-$(dirname "$0")/../patches}"
-NUM_CORES="${NUM_CORES:-$(nproc)}"
+# ── Configuration ─────────────────────────────────────────────────────
+# These can be overridden via environment variables
+: "${FLOW_CACHE_DIR:="${XDG_CACHE_HOME:-$HOME/.cache}/flow-iosched/kernels"}"
+: "${FLOW_PATCH_DIR:=""}"          # Auto-detected from script location
+: "${FLOW_MAKE_JOBS:="$(nproc)"}"  # Parallel build jobs
 
-if [ ! -d "$KERNEL_SRC/block" ]; then
-    echo "Kernel source not found at $KERNEL_SRC"
-    echo "Set KERNEL_SRC to point to a full kernel tree."
-    echo ""
-    echo "  # Example: fetch matching source"
-    echo "  curl -L https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.5.tar.xz | tar xJ"
-    echo "  export KERNEL_SRC=\$PWD/linux-7.0.5"
+# ── Global state ──────────────────────────────────────────────────────
+VERSION=""
+MAJOR=""
+MINOR=""
+PATCH=""
+KERNEL_DIR=""
+TARBALL=""
+BOOT_PREFIX="flow-iosched"
+
+# ── Utilities ─────────────────────────────────────────────────────────
+
+err() { echo "ERROR: $*" >&2; }
+info() { echo "==> $*"; }
+warn() { echo "WARNING: $*" >&2; }
+
+die() {
+    err "$*"
     exit 1
+}
+
+# Auto-detect the patches directory relative to this script
+find_patch_dir() {
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    # Walk up from script location looking for patches/
+    local dir="$script_dir"
+    while [ "$dir" != "/" ]; do
+        if [ -d "$dir/patches" ]; then
+            echo "$dir/patches"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    # Fall back to script-relative path
+    echo "$script_dir/../patches"
+}
+
+# Parse a version string like "7.0.5" into major.minor.patch
+# Also handles "6.18" -> 6.18.0
+parse_version() {
+    local v="$1"
+    MAJOR=""
+    MINOR=""
+    PATCH=""
+
+    if ! [[ "$v" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        die "Invalid version format: '$v'. Expected e.g. 7.0.5 or 6.18"
+    fi
+
+    MAJOR="${v%%.*}"
+    local rest="${v#*.}"
+    MINOR="${rest%%.*}"
+    if [[ "$rest" == *"."* ]]; then
+        PATCH="${rest#*.}"
+    else
+        PATCH="0"
+    fi
+}
+
+# Convert major.minor to the kernel.org major directory name (e.g. "v7.x")
+major_dir() {
+    local m="$1"
+    echo "v${m}.x"
+}
+
+# Build the kernel.org tarball URL for a given version.
+# Kernel.org ships releases without a patch suffix (e.g. linux-6.12.tar.xz
+# not linux-6.12.0.tar.xz). Only incremental releases include the patch
+# number (e.g. linux-6.12.1.tar.xz).
+tarball_url() {
+    local major="$1" minor="$2" patch="$3"
+    local dir
+    dir=$(major_dir "$major")
+    if [ "$patch" = "0" ]; then
+        echo "https://cdn.kernel.org/pub/linux/kernel/${dir}/linux-${major}.${minor}.tar.xz"
+    else
+        echo "https://cdn.kernel.org/pub/linux/kernel/${dir}/linux-${major}.${minor}.${patch}.tar.xz"
+    fi
+}
+
+# Check if a command exists
+need_cmd() {
+    if ! command -v "$1" &>/dev/null; then
+        die "Required command not found: $1"
+    fi
+}
+
+# Check available disk space in a directory (in MB)
+disk_space_mb() {
+    local dir="$1"
+    local kb
+    kb=$(df -P "$dir" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -z "$kb" ] || [ "$kb" -lt 1 ]; then
+        echo 0
+        return
+    fi
+    echo $(( kb / 1024 ))
+}
+
+# ── Version support checks ────────────────────────────────────────────
+
+needs_compat_0002() {
+    # Kernels 6.12 through 6.17 need 0002 for init_sched signature
+    [ "$MAJOR" -lt 6 ] && return 1  # 5.x not supported
+    [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 12 ] && return 1  # < 6.12 not supported
+    [ "$MAJOR" -eq 6 ] && [ "$MINOR" -ge 18 ] && return 1  # 6.18+ no compat needed
+    return 0  # 6.12-6.17: compat needed
+}
+
+is_version_supported() {
+    # Only 6.12+ is supported (6.18+ with 0001, 6.12-6.17 with 0001+0002)
+    if [ "$MAJOR" -lt 6 ]; then
+        return 1
+    fi
+    if [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 12 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# ── Build tool verification ───────────────────────────────────────────
+
+check_deps() {
+    local missing=false
+    for cmd in b2sum bc curl make gcc git patch xz; do
+        if ! command -v "$cmd" &>/dev/null; then
+            err "Missing build dependency: $cmd"
+            missing=true
+        fi
+    done
+
+    # Verify kernel build prerequisites
+    if ! command -v "mkinitcpio" &>/dev/null; then
+        err "Missing: mkinitcpio (install with: pacman -S mkinitcpio)"
+        missing=true
+    fi
+
+    if [ "$missing" = true ]; then
+        die "Install missing dependencies and re-run."
+    fi
+}
+
+# ── Kernel source download and extraction ─────────────────────────────
+
+download_source() {
+    local url="$1"
+    local dest="$2"
+    local tmp_dest="${dest}.part"
+
+    info "Downloading $url ..."
+    curl -fSL --retry 3 --progress-bar -o "$tmp_dest" "$url" || {
+        rm -f "$tmp_dest"
+        die "Download failed for $url"
+    }
+
+    # Verify it's a valid xz archive
+    xz -t "$tmp_dest" 2>/dev/null || {
+        rm -f "$tmp_dest"
+        die "Downloaded file is corrupted (not a valid xz archive)"
+    }
+
+    mv "$tmp_dest" "$dest"
+    info "Downloaded to $dest"
+}
+
+extract_source() {
+    local tarball="$1"
+    local dest_dir="$2"
+    local tmp_extract="${dest_dir}.tmp"
+
+    info "Extracting $tarball ..."
+
+    # Check disk space (kernel source needs ~6 GB uncompressed)
+    local available
+    available=$(disk_space_mb "$(dirname "$dest_dir")")
+    if [ "$available" -gt 0 ] && [ "$available" -lt 6144 ]; then
+        die "Insufficient disk space in $(dirname "$dest_dir"): ${available}MB available, need ~6144MB"
+    fi
+
+    rm -rf "$tmp_extract"
+    mkdir -p "$tmp_extract"
+
+    tar -xJf "$tarball" -C "$tmp_extract" || {
+        rm -rf "$tmp_extract"
+        die "Extraction failed (corrupted tarball or insufficient disk space)."
+    }
+
+    # The tarball creates linux-X.Y.Z directory; move contents to our expected name
+    local extracted
+    shopt -s nullglob
+    extracted=("$tmp_extract"/*)
+    shopt -u nullglob
+    if [ ${#extracted[@]} -eq 1 ] && [ -d "${extracted[0]}" ]; then
+        mv "${extracted[0]}" "$dest_dir"
+    else
+        mv "$tmp_extract" "$dest_dir"
+    fi
+    rm -rf "$tmp_extract"
+
+    info "Extracted to $dest_dir"
+}
+
+# ── Patch application ─────────────────────────────────────────────────
+
+apply_patches() {
+    local kernel_dir="$1"
+    local patch_dir="$2"
+    local major="$3" minor="$4"
+    local applied=0
+
+    # Determine which patches to apply
+    local patches_to_apply=()
+
+    # 0001 is always applied for all supported versions
+    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch" ]; then
+        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch")
+    else
+        die "0001 patch not found at $patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch"
+    fi
+
+    # 0002 is needed for 6.12-6.17
+    if needs_compat_0002; then
+        if [ -f "$patch_dir/0002-linux6.12-flow-iosched-compat.patch" ]; then
+            patches_to_apply+=("$patch_dir/0002-linux6.12-flow-iosched-compat.patch")
+        else
+            die "0002 compat patch not found at $patch_dir/0002-linux6.12-flow-iosched-compat.patch"
+        fi
+    fi
+
+    cd "$kernel_dir"
+
+    for patch in "${patches_to_apply[@]}"; do
+        local patch_name
+        patch_name="$(basename "$patch")"
+        info "Applying $patch_name ..."
+
+        # Try git am first, fall back to patch -p1
+        if git apply --check "$patch" 2>/dev/null; then
+            git am "$patch" 2>/dev/null || {
+                git am --abort 2>/dev/null || true
+                # Fallback: apply with patch
+                patch -p1 < "$patch" 2>/dev/null || {
+                    die "Failed to apply $patch_name"
+                }
+            }
+        else
+            patch -p1 < "$patch" 2>/dev/null || {
+                die "Failed to apply $patch_name"
+            }
+        fi
+        ((applied++))
+    done
+
+    info "Applied $applied patch(es) successfully"
+}
+
+# ── Kernel configuration ──────────────────────────────────────────────
+
+configure_kernel() {
+    local kernel_dir="$1"
+
+    cd "$kernel_dir"
+
+    # Use the running kernel's config as base (best-effort)
+    if [ -f /proc/config.gz ]; then
+        info "Using running kernel's configuration as base ..."
+        zcat /proc/config.gz > .config
+    elif [ -f "/lib/modules/$(uname -r)/build/.config" ]; then
+        info "Using /lib/modules/$(uname -r)/build/.config as base ..."
+        cp "/lib/modules/$(uname -r)/build/.config" .config
+    else
+        warn "No running kernel config found. Using default config."
+    fi
+
+    # Update to match this kernel version's options
+    make olddefconfig 2>&1 || die "'make olddefconfig' failed"
+
+    # Enable the flow-iosched scheduler
+    if grep -q "CONFIG_MQ_IOSCHED_FLOW" .config 2>/dev/null; then
+        # Config option already exists (from patch), enable it
+        ./scripts/config --enable CONFIG_MQ_IOSCHED_FLOW || {
+            warn "Could not enable CONFIG_MQ_IOSCHED_FLOW via scripts/config"
+            # Fallback: sed the config directly
+            sed -i 's/# CONFIG_MQ_IOSCHED_FLOW is not set/CONFIG_MQ_IOSCHED_FLOW=m/' .config
+        }
+    else
+        # Config option doesn't exist yet — patch may not have applied. Bail out.
+        die "CONFIG_MQ_IOSCHED_FLOW not found in .config. Did the patch apply correctly?"
+    fi
+
+    # Refresh dependencies for the new option
+    make olddefconfig 2>&1 || die "'make olddefconfig' failed after enabling flow-iosched"
+
+    # Verify the option is now enabled
+    if ! grep -q "^CONFIG_MQ_IOSCHED_FLOW=" .config; then
+        die "CONFIG_MQ_IOSCHED_FLOW is not set after configuration. Something went wrong."
+    fi
+}
+
+# ── Build ─────────────────────────────────────────────────────────────
+
+build_kernel() {
+    local kernel_dir="$1"
+    local bzimage_target="bzImage"
+
+    cd "$kernel_dir"
+
+    info "Building kernel (bzImage) with $FLOW_MAKE_JOBS parallel jobs ..."
+    make -j"$FLOW_MAKE_JOBS" "$bzimage_target" 2>&1 || die "Kernel build (bzImage) failed"
+    info "bzImage built successfully"
+
+    info "Building kernel modules ..."
+    make -j"$FLOW_MAKE_JOBS" modules 2>&1 || die "Kernel modules build failed"
+    info "Modules built successfully"
+}
+
+# ── Installation (requires root) ──────────────────────────────────────
+
+install_kernel() {
+    local kernel_dir="$1"
+    local version="$2"
+    local major="$3" minor="$4" patch="$5"
+    local dest_vmlinuz="/boot/vmlinuz-linux-flow-${version}"
+    local dest_config="/boot/config-${version}-flow"
+    local dest_initramfs="/boot/initramfs-linux-flow-${version}.img"
+    local entry_title="Flow I/O Scheduler (${version})"
+    local fallback_title="Flow I/O Scheduler ${version} (fallback)"
+
+    cd "$kernel_dir"
+
+    # ── Install modules ───────────────────────────────────────────
+    info "Installing kernel modules ..."
+    make modules_install 2>&1 || die "Failed to install modules"
+
+    # ── Install kernel image ──────────────────────────────────────
+    local bzimage_src="arch/x86/boot/bzImage"
+    if [ ! -f "$bzimage_src" ]; then
+        die "bzImage not found at $bzimage_src. Build may have failed."
+    fi
+
+    info "Installing kernel image ..."
+    cp -f "$bzimage_src" "$dest_vmlinuz"
+    cp -f ".config" "$dest_config"
+
+    # ── Build initramfs ───────────────────────────────────────────
+    if command -v mkinitcpio &>/dev/null; then
+        info "Building initramfs ..."
+        mkinitcpio -k "$dest_vmlinuz" -g "$dest_initramfs" 2>&1 || {
+            warn "mkinitcpio failed. Continuing without initramfs."
+        }
+    else
+        warn "mkinitcpio not found. Skipping initramfs creation."
+    fi
+
+    # ── Compute BLAKE2b hashes ────────────────────────────────────
+    info "Computing BLAKE2b hashes ..."
+    local kernel_hash="" initrd_hash=""
+    if command -v b2sum &>/dev/null; then
+        kernel_hash=$(b2sum "$dest_vmlinuz" | cut -d' ' -f1)
+        if [ -f "$dest_initramfs" ]; then
+            initrd_hash=$(b2sum "$dest_initramfs" | cut -d' ' -f1)
+        fi
+        info "  Kernel:   ${kernel_hash}"
+        info "  Initramfs: ${initrd_hash:-"(not available)"}"
+    else
+        warn "b2sum not found. Skipping hash computation."
+    fi
+
+    # ── Create / update Limine boot entry ─────────────────────────
+    setup_limine_entry "$entry_title" "$fallback_title" \
+        "/vmlinuz-linux-flow-${version}" \
+        "/initramfs-linux-flow-${version}.img" \
+        "$kernel_hash" "$initrd_hash"
+}
+
+setup_limine_entry() {
+    local entry_title="$1"
+    local fallback_title="$2"
+    local kernel_relpath="$3"    # e.g. /vmlinuz-linux-flow-7.0.5
+    local initrd_relpath="$4"    # e.g. /initramfs-linux-flow-7.0.5.img
+    local kernel_hash="$5"
+    local initrd_hash="$6"
+
+    # Locate Limine configuration file
+    local limine_conf=""
+    for candidate in \
+        /boot/limine/limine.conf \
+        /boot/limine.conf \
+        /limine/limine.conf \
+        /limine.conf; do
+        if [ -f "$candidate" ]; then
+            limine_conf="$candidate"
+            break
+        fi
+    done
+
+    # If no limine.conf exists, create one at the preferred location
+    if [ -z "$limine_conf" ]; then
+        # Check which parent directory exists and use that
+        if [ -d "/boot/limine" ]; then
+            limine_conf="/boot/limine/limine.conf"
+        elif [ -d "/boot" ]; then
+            limine_conf="/boot/limine.conf"
+        elif [ -d "/limine" ]; then
+            limine_conf="/limine/limine.conf"
+        else
+            warn "No suitable location for limine.conf found."
+            warn "Boot entries will not be created automatically."
+            return 1
+        fi
+        info "Creating new Limine configuration at $limine_conf"
+    fi
+
+    # Escape dots in titles for sed regex safety (e.g. "7.0.5" -> "7\.0\.5")
+    local escaped_title
+    escaped_title="$(printf '%s\n' "$entry_title" | sed 's/\./\\./g')"
+    local escaped_fallback
+    escaped_fallback="$(printf '%s\n' "$fallback_title" | sed 's/\./\\./g')"
+
+    # Remove any existing entry with the same title (from previous runs)
+    if grep -qF "/$entry_title" "$limine_conf" 2>/dev/null; then
+        info "Removing previous entry: $entry_title ..."
+        sed -i "/^\/$escaped_title/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_title/d; }" "$limine_conf"
+    fi
+    if grep -qF "/$fallback_title" "$limine_conf" 2>/dev/null; then
+        sed -i "/^\/$escaped_fallback/,/^\/[^/]/{ /^\/[^/]/!d; /^\/$escaped_fallback/d; }" "$limine_conf"
+    fi
+
+    # Append the hash-verified entry
+    {
+        echo ""
+        echo "/$entry_title"
+        echo "    protocol: linux"
+        if [ -n "$kernel_hash" ]; then
+            echo "    kernel_path: boot():${kernel_relpath}#${kernel_hash}"
+        else
+            echo "    kernel_path: boot():${kernel_relpath}"
+        fi
+        if [ -n "$kernel_hash" ] && [ -n "$initrd_hash" ]; then
+            echo "    module_path: boot():${initrd_relpath}#${initrd_hash}"
+        elif [ -f "/boot${initrd_relpath}" ]; then
+            echo "    module_path: boot():${initrd_relpath}"
+        fi
+        # Include the kernel cmdline from the running system for convenience
+        if [ -f /proc/cmdline ]; then
+            local cmdline
+            cmdline=$(cat /proc/cmdline)
+            echo "    cmdline: ${cmdline}"
+        fi
+    } >> "$limine_conf"
+    info "Boot entry added: $entry_title"
+
+    # Append the fallback entry (no hashes — always bootable)
+    {
+        echo ""
+        echo "/$fallback_title"
+        echo "    protocol: linux"
+        echo "    kernel_path: boot():${kernel_relpath}"
+        if [ -f "/boot${initrd_relpath}" ]; then
+            echo "    module_path: boot():${initrd_relpath}"
+        fi
+        echo "    comment: No BLAKE2b hash check — safe after kernel reinstall"
+        if [ -f /proc/cmdline ]; then
+            local cmdline
+            cmdline=$(cat /proc/cmdline)
+            echo "    cmdline: ${cmdline}"
+        fi
+    } >> "$limine_conf"
+    info "Fallback entry added: $fallback_title"
+}
+
+# ── Main logic ────────────────────────────────────────────────────────
+
+main() {
+    # ── Parse arguments ───────────────────────────────────────────
+    if [ $# -lt 1 ]; then
+        echo "Usage: $0 <kernel-version>"
+        echo ""
+        echo "Examples:"
+        echo "  $0 7.0.5    # Build upstream 7.0.5 with flow-iosched"
+        echo "  $0 6.18     # Build upstream 6.18"
+        echo "  $0 6.12     # Build upstream 6.12 with compat patch"
+        echo ""
+        echo "Supported: 6.12+  (5.18-6.11 not supported — elevator API differs)"
+        exit 1
+    fi
+
+    VERSION="$1"
+    parse_version "$VERSION"
+
+    # ── Version support check ─────────────────────────────────────
+    if ! is_version_supported; then
+        die "Kernel ${MAJOR}.${MINOR}.${PATCH} is not supported." \
+            "Supported ranges: 6.12.x to 6.19.x, 7.0.x+" \
+            "(5.18-6.11 has different elevator op signatures and needs a compat patch)"
+    fi
+
+    # ── Determine paths ───────────────────────────────────────────
+    if [ -z "$FLOW_PATCH_DIR" ]; then
+        FLOW_PATCH_DIR="$(find_patch_dir)"
+    fi
+    if [ ! -d "$FLOW_PATCH_DIR" ]; then
+        die "Patches directory not found at $FLOW_PATCH_DIR"
+    fi
+
+    mkdir -p "$FLOW_CACHE_DIR"
+
+    local major_dir_name
+    major_dir_name=$(major_dir "$MAJOR")
+    if [ "$PATCH" = "0" ]; then
+        KERNEL_DIR="$FLOW_CACHE_DIR/linux-${MAJOR}.${MINOR}"
+        TARBALL="$FLOW_CACHE_DIR/linux-${MAJOR}.${MINOR}.tar.xz"
+    else
+        KERNEL_DIR="$FLOW_CACHE_DIR/linux-${MAJOR}.${MINOR}.${PATCH}"
+        TARBALL="$FLOW_CACHE_DIR/linux-${MAJOR}.${MINOR}.${PATCH}.tar.xz"
+    fi
+
+    # ── Check dependencies ────────────────────────────────────────
+    check_deps
+
+    # ── Step 1: Download ──────────────────────────────────────────
+    if [ -f "$TARBALL" ]; then
+        info "Tarball already cached at $TARBALL"
+    else
+        local url
+        url=$(tarball_url "$MAJOR" "$MINOR" "$PATCH")
+        info "Kernel source URL: $url"
+        download_source "$url" "$TARBALL"
+    fi
+
+    # ── Step 2: Extract ───────────────────────────────────────────
+    if [ -d "$KERNEL_DIR" ]; then
+        info "Kernel source already extracted at $KERNEL_DIR"
+    else
+        extract_source "$TARBALL" "$KERNEL_DIR"
+    fi
+
+    # ── Step 3: Apply patches ─────────────────────────────────────
+    info "Applying flow-iosched patches to ${MAJOR}.${MINOR}.${PATCH} ..."
+    apply_patches "$KERNEL_DIR" "$FLOW_PATCH_DIR" "$MAJOR" "$MINOR"
+
+    # ── Step 4: Configure ─────────────────────────────────────────
+    info "Configuring kernel ..."
+    configure_kernel "$KERNEL_DIR"
+
+    # ── Step 5: Build ─────────────────────────────────────────────
+    info "Building kernel (this may take a while) ..."
+    build_kernel "$KERNEL_DIR"
+
+    # ── Step 6: Install (needs root) ──────────────────────────────
+    if [ "$EUID" -ne 0 ]; then
+        info "Re-invoking with sudo for kernel installation ..."
+        exec sudo "$0" --install "$VERSION" "$KERNEL_DIR" "$MAJOR" "$MINOR" "$PATCH"
+    fi
+
+    install_kernel "$KERNEL_DIR" "$VERSION" "$MAJOR" "$MINOR" "$PATCH"
+
+    # ── Done ──────────────────────────────────────────────────────
+    echo ""
+    echo "============================================"
+    echo " Build complete for kernel ${VERSION}"
+    echo "============================================"
+    echo ""
+    echo "Installed files:"
+    echo "  Kernel:  /boot/vmlinuz-linux-flow-${VERSION}"
+    echo "  Config:  /boot/config-${VERSION}-flow"
+    echo "  Initram: /boot/initramfs-linux-flow-${VERSION}.img"
+    echo ""
+    echo "Reboot and select 'Flow I/O Scheduler (${VERSION})' from the Limine menu."
+    echo ""
+    echo "If the hash-verified entry fails (e.g. after reinstalling without rebuilding),"
+    echo "use the fallback entry which skips the hash check."
+}
+
+# ── Install-only mode (invoked by sudo re-exec) ──────────────────────
+if [ "${1:-}" = "--install" ]; then
+    VERSION="$2"
+    KERNEL_DIR="$3"
+    MAJOR="$4"
+    MINOR="$5"
+    PATCH="$6"
+    install_kernel "$KERNEL_DIR" "$VERSION" "$MAJOR" "$MINOR" "$PATCH"
+
+    echo ""
+    echo "============================================"
+    echo " Installation complete for kernel ${VERSION}"
+    echo "============================================"
+    exit 0
 fi
 
-# --- 1. Apply flow-iosched patches ---
-
-echo "==> Applying 0001 (flow-iosched core + Kconfig + Makefile) ..."
-cd "$KERNEL_SRC"
-git am "$PATCH_DIR"/0001-linux7.0-flow-iosched-v1.0.0.patch 2>/dev/null || \
-    patch -p1 < "$PATCH_DIR"/0001-linux7.0-flow-iosched-v1.0.0.patch
-
-# Detect whether the compat patch is needed
-if ! grep -q 'static int flow_init_sched.*elevator_queue \*eq' block/flow-iosched.c 2>/dev/null; then
-    echo "==> Applying 0002 (6.12-compat init_sched) ..."
-    git am "$PATCH_DIR"/0002-linux6.12-flow-iosched-compat.patch 2>/dev/null || \
-        patch -p1 < "$PATCH_DIR"/0002-linux6.12-flow-iosched-compat.patch
-fi
-
-# --- 2. Configure ---
-
-echo "==> Enabling CONFIG_MQ_IOSCHED_FLOW ..."
-make olddefconfig
-./scripts/config -e MQ_IOSCHED_FLOW
-./scripts/config -d MQ_IOSCHED_DEFAULT_FLOW   # manual selection via sysfs
-
-# --- 3. Build kernel ---
-
-echo "==> Building kernel (${NUM_CORES} cores) ..."
-make -j"$NUM_CORES" bzImage modules
-
-# --- 4. Install ---
-
-echo "==> Installing modules ..."
-sudo make modules_install
-sudo cp arch/x86/boot/bzImage /boot/vmlinuz-linux-flow
-sudo mkinitcpio -k /boot/vmlinuz-linux-flow -g /boot/initramfs-linux-flow.img
-
-echo ""
-echo "Done.  Reboot and select flow-iosched at runtime:"
-echo "  echo flow-iosched | sudo tee /sys/block/<dev>/queue/scheduler"
+main "$@"
