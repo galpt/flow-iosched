@@ -705,7 +705,7 @@ main() {
     # ── Step 6: Install (needs root) ──────────────────────────────
     if [ "$EUID" -ne 0 ]; then
         info "Re-invoking with sudo for kernel installation ..."
-        exec sudo "$0" --install "$VERSION" "$KERNEL_DIR" "$MAJOR" "$MINOR" "$PATCH"
+        exec sudo "${SCRIPT_DIR}/build-kernel.sh" --install "$VERSION" "$KERNEL_DIR" "$MAJOR" "$MINOR" "$PATCH"
     fi
 
     install_kernel "$KERNEL_DIR" "$VERSION" "$MAJOR" "$MINOR" "$PATCH"
