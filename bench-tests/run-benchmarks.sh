@@ -11,7 +11,7 @@ set -euo pipefail
 
 FIO="${FIO:-fio}"
 RESULTS_DIR="results"
-DEVICE="${DEVICE:-/dev/nvme0n1}"
+DEVICE="${DEVICE:?ERROR: DEVICE must be set to a dedicated test block device (e.g. DEVICE=/dev/nvme1n1)}"
 SCHEDULERS="${SCHEDULERS:-none mq-deadline kyber bfq adios flow-iosched}"
 NUM_JOBS=8
 RUNTIME=30
@@ -28,6 +28,14 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
+# ── Safety: reject devices with mounted partitions ───────────────────
+if lsblk -n -o MOUNTPOINT "$DEVICE" 2>/dev/null | grep -q '[^[:space:]]'; then
+    echo "ERROR: $DEVICE (or a partition on it) has mounted filesystems." >&2
+    echo "  Refusing to run benchmarks on an active device." >&2
+    echo "  Use a dedicated test device with no mounted partitions." >&2
+    exit 1
+fi
+
 mkdir -p "$RESULTS_DIR"
 
 echo "I/O Scheduler Benchmarks"
@@ -40,12 +48,16 @@ bench() {
     local name="$1" bs="$2" iodepth="$3" rwmix="$4" scheduler="$5"
     local out="$RESULTS_DIR/${scheduler}_${name}.json"
 
+    # Flush pending writes before switching schedulers
+    sync
+    sudo blockdev --flushbufs "$DEVICE" 2>/dev/null || true
+
     # Select scheduler
     echo "$scheduler" | sudo tee /sys/block/$(basename "$DEVICE")/queue/scheduler > /dev/null
 
     echo "  [${scheduler}] ${name} (bs=${bs}, depth=${iodepth}, mix=${rwmix}) ..."
 
-    sudo "$FIO" --name="${scheduler}_${name}" \
+    if ! sudo "$FIO" --name="${scheduler}_${name}" \
         --filename="$DEVICE" \
         --direct=1 \
         --ioengine=libaio \
@@ -58,7 +70,9 @@ bench() {
         --runtime="$RUNTIME" \
         --time_based=1 \
         --output-format=json \
-        --output="$out"
+        --output="$out"; then
+        echo "  [${scheduler}] WARNING: fio failed for ${name}" >&2
+    fi
 }
 
 # Header
