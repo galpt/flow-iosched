@@ -3,18 +3,23 @@
 #
 # I/O scheduler benchmark runner.
 #
-# Compares flow-iosched against mq-deadline, kyber, bfq, and adios
-# using fio across five workloads.  Results are written to results/
-# as CSV files.
+# Compares flow-iosched against other available schedulers using fio
+# across five workloads.  Results are written to results/ as CSV files.
+#
+# Devices:
+#   DEVICE=/dev/nullb0  — uses null_blk (auto-loaded, virtual RAM device)
+#   DEVICE=/dev/nvme1n1 — real dedicated NVMe drive (no partitions mounted)
+#
+# Usage:
+#   DEVICE=/dev/nullb0 sudo ./bench-tests/run-benchmarks.sh
+#   DEVICE=/dev/nvme1n1 sudo ./bench-tests/run-benchmarks.sh
 
 set -euo pipefail
 
 FIO="${FIO:-fio}"
 RESULTS_DIR="results"
-DEVICE="${DEVICE:?ERROR: DEVICE must be set to a dedicated test block device (e.g. DEVICE=/dev/nvme1n1)}"
-SCHEDULERS="${SCHEDULERS:-none mq-deadline kyber bfq adios flow-iosched}"
+RUNTIME="${RUNTIME:-30}"
 NUM_JOBS=8
-RUNTIME=30
 
 # ── Check dependencies ────────────────────────────────────────────────
 if ! command -v "$FIO" &>/dev/null; then
@@ -28,20 +33,59 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-# ── Safety: reject devices with mounted partitions ───────────────────
-if lsblk -n -o MOUNTPOINT "$DEVICE" 2>/dev/null | grep -q '[^[:space:]]'; then
-    echo "ERROR: $DEVICE (or a partition on it) has mounted filesystems." >&2
-    echo "  Refusing to run benchmarks on an active device." >&2
-    echo "  Use a dedicated test device with no mounted partitions." >&2
-    exit 1
+# ── Resolve device ────────────────────────────────────────────────────
+DEVICE="${DEVICE:?ERROR: DEVICE must be set (e.g. DEVICE=/dev/nullb0 or DEVICE=/dev/nvme1n1)}"
+
+# If using null_blk, auto-load and set up cleanup
+NULLBLK_CLEANUP=false
+if [[ "$DEVICE" == /dev/nullb* ]] || [[ "$DEVICE" == nullb* ]]; then
+    DEVICE="/dev/nullb0"
+    echo "Loading null_blk module for synthetic benchmarking..."
+    sudo modprobe null_blk nr_devices=1
+    NULLBLK_CLEANUP=true
+    # Wait for device to appear
+    for i in $(seq 1 10); do
+        [ -b "$DEVICE" ] && break
+        sleep 0.5
+    done
+fi
+
+cleanup() {
+    if $NULLBLK_CLEANUP; then
+        echo "Unloading null_blk..."
+        sudo modprobe -r null_blk 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# ── Safety: reject devices with mounted partitions (skip for null_blk) ─
+if ! $NULLBLK_CLEANUP; then
+    if lsblk -n -o MOUNTPOINT "$DEVICE" 2>/dev/null | grep -q '[^[:space:]]'; then
+        echo "ERROR: $DEVICE (or a partition on it) has mounted filesystems." >&2
+        echo "  Refusing to run benchmarks on an active device." >&2
+        exit 1
+    fi
 fi
 
 mkdir -p "$RESULTS_DIR"
 
 echo "I/O Scheduler Benchmarks"
 echo "========================"
-echo "Device: $DEVICE"
-echo "Runtime: ${RUNTIME}s per test"
+echo "Device:   $DEVICE"
+echo "Runtime:  ${RUNTIME}s per test"
+echo ""
+
+# Build scheduler list dynamically from what's available
+SCHEDULERS="${SCHEDULERS:-}"
+if [ -z "$SCHEDULERS" ]; then
+    for s in none mq-deadline kyber bfq adios flow-iosched; do
+        if grep -qw "$s" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
+            SCHEDULERS="$SCHEDULERS $s"
+        fi
+    done
+    SCHEDULERS="${SCHEDULERS# }"
+fi
+echo "Schedulers: $SCHEDULERS"
 echo ""
 
 bench() {
@@ -80,7 +124,6 @@ echo "scheduler,workload,read_iops,write_iops,read_lat_us,write_lat_us" \
     > "$RESULTS_DIR/summary.csv"
 
 for sched in $SCHEDULERS; do
-    # Check that the scheduler exists
     if ! grep -q "$sched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
         echo "  [${sched}] SKIPPED — not available on this kernel"
         continue
@@ -92,7 +135,6 @@ for sched in $SCHEDULERS; do
     bench "seqwrite_128k" "128k" 8  0    "$sched"
     bench "mixed_70_30"   "4k"  8   70   "$sched"
 
-    # Extract summary row
     for wl in randread_4k randwrite_4k seqread_128k seqwrite_128k mixed_70_30; do
         f="$RESULTS_DIR/${sched}_${wl}.json"
         [ -f "$f" ] || continue
@@ -113,27 +155,21 @@ try:
     d = json.load(open('$f'))
     print(d['jobs'][0]['write']['iops'])
 except Exception:
-    sys.exit(1)" 2>/dev/null) || {
-            continue
-        }
+    sys.exit(1)" 2>/dev/null) || { continue; }
         read_lat=$(python3 -c "
 import json, sys
 try:
     d = json.load(open('$f'))
     print(d['jobs'][0]['read']['lat_ns']['mean'] / 1000)
 except Exception:
-    sys.exit(1)" 2>/dev/null) || {
-            continue
-        }
+    sys.exit(1)" 2>/dev/null) || { continue; }
         write_lat=$(python3 -c "
 import json, sys
 try:
     d = json.load(open('$f'))
     print(d['jobs'][0]['write']['lat_ns']['mean'] / 1000)
 except Exception:
-    sys.exit(1)" 2>/dev/null) || {
-            continue
-        }
+    sys.exit(1)" 2>/dev/null) || { continue; }
 
         echo "$sched,$wl,$read_iops,$write_iops,$read_lat,$write_lat" \
             >> "$RESULTS_DIR/summary.csv"
@@ -142,4 +178,8 @@ done
 
 echo ""
 echo "Done.  Results in $RESULTS_DIR/summary.csv"
-echo "Generate charts: python3 plot-results.py"
+echo "Generate charts: python3 bench-tests/plot-results.py"
+echo ""
+if $NULLBLK_CLEANUP; then
+    echo "null_blk device will be removed automatically on exit."
+fi
