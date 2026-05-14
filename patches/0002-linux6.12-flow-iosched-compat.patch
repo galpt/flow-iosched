@@ -1,33 +1,48 @@
+From 93f119df62379790156e022c4b83510d1beb63d4 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Tue, 12 May 2026 22:22:09 +0700
+Date: Thu, 14 May 2026 17:25:11 +0700
 Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17
 
 Kernels 6.12 through 6.17 pass (request_queue *, elevator_type *) to
 init_sched, while 6.18+ pass (request_queue *, elevator_queue *).
 
-Apply after 0001-linux7.0-flow-iosched-v1.0.0.patch to replace the
-init_sched function with the older signature and add elevator_alloc().
+Changes needed for 6.12-6.17 compatibility:
+  - Replace init_sched signature to take elevator_type * instead of
+    elevator_queue *
+  - Call elevator_alloc() internally to allocate the elevator_queue
+  - Set q->elevator = eq after successful init (the caller on 6.12
+    does not set it)
+  - Add proper error handling with kobject_put on eq->kobj; all error
+    goto targets after elevator_alloc must clean up the eq reference
 
-Order: apply 0001, then 0002.
+Order: apply after 0001-linux7.0-flow-iosched-v1.1.0.patch
+
+Other API differences between 6.12-6.17 and 6.18+ are compatible with
+the existing code (limit_depth, insert_requests, init_hctx, exit_hctx,
+init_icq, exit_icq all share the same signatures across these versions).
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/flow-iosched.c | 20 ++++++++++++++++++++--
- 16 insertions(+), 4 deletions(-)
+ block/flow-iosched.c | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index aa8ead8..10df62a 100644
+index de0b659..e4fd76e 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -873,18 +873,27 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
+@@ -845,18 +845,28 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
  
  /* ── Init / Exit ──────────────────────────────────────────────────── */
  
--/* Kernel 7.x init_sched signature: passes a pre-allocated elevator_queue.
-- * For older kernels (6.12-, which pass elevator_type), use the
-+/* 6.12-compat init_sched signature: passes a pre-allocated elevator_queue.
-+ * For kernel 7.x (6.18+, which passes elevator_queue), use the
-  * patches/ directory for the compatibility patch.                      */
+-/* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
+- * For kernels 6.12-6.17 (which pass elevator_type), apply
+- * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
 -static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
++/*
++ * 6.12-6.17 compat init_sched signature: passes elevator_type *.
++ * The function allocates the elevator_queue internally via elevator_alloc()
++ * and sets q->elevator, which the caller on 6.18+ does instead.
++ */
 +static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
  {
  	struct flow_data *fd;
@@ -37,8 +52,7 @@ index aa8ead8..10df62a 100644
 +	eq = elevator_alloc(q, e);
 +	if (!eq) {
 +		pr_err("flow-iosched: failed to allocate elevator\n");
-+		ret = -ENOMEM;
-+		goto out_put_eq;
++		return -ENOMEM;
 +	}
 +
  	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
@@ -50,13 +64,33 @@ index aa8ead8..10df62a 100644
  	}
  
  	/* Create memory pools */
-@@ -971,6 +980,9 @@ destroy_rq_pool:
+@@ -865,7 +875,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+ 					      0, SLAB_HWCACHE_ALIGN, NULL);
+ 	if (!fd->rq_data_cache) {
+ 		pr_err("flow-iosched: failed to create rq_data cache\n");
+-		goto free_fd;
++		goto out_put_eq;
+ 	}
+ 
+ 	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
+@@ -929,12 +939,17 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+ 	fd->queue = q;
+ 	blk_stat_enable_accounting(q);
+ 
++	/* 6.12 compat: caller does not set q->elevator; we must */
++	q->elevator = eq;
++
+ 	return 0;
+ 
+ destroy_rq_pool:
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
-+
 +out_put_eq:
 +	kobject_put(&eq->kobj);
  free_fd:
  	kfree(fd);
  	return ret;
+-- 
+2.54.0
+

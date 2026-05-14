@@ -48,11 +48,11 @@ contained lane until the score decays below the threshold again.
 ## Kernel Compatibility
 
 | Kernel range | Notes |
-|---|---|
+|---|---|---|
 | 7.0.x (CachyOS) | Default target — use source as-is.  (CachyOS ships `MQ_IOSCHED_ADIOS` which uses the same elevator API.) |
 | 6.18 – 6.19 | Same init_sched API as 7.x — use source as-is. |
-| 6.12 – 6.17 | Older init_sched signature — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after 0001. |
-| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but `DEFINE_LOCK_GUARD_1(spinlock_irqsave)` availability is per-release — untested. |
+| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after applying `patches/0001-linux7.0-flow-iosched-v1.1.0.patch`. |
+| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — a dedicated compat patch would be needed for this range. |
 
 The `patches/` directory follows the approach used by
 [ADIOS](https://github.com/firelzrd/adios), shipping separate patches per
@@ -63,6 +63,11 @@ kernel cycle.
 > [!TIP]
 > The standalone build does not require patching the kernel — build against
 > your running kernel's headers and load at runtime.
+>
+> Note: Some kernel distributions do not export `block/elevator.h` for
+> out-of-tree builds. In that case you can copy the header from the kernel
+> source tree or build the scheduler as an integrated module via the
+> `patches/` approach below.
 
 ```bash
 cd block
@@ -76,7 +81,7 @@ initramfs scripts (e.g. `/etc/initramfs-tools/scripts/init-top/`).
 
 ### Integrating Into a Kernel Tree
 
-1. Apply `patches/0001-linux7.0-flow-iosched-v1.0.0.patch` — creates the
+1. Apply `patches/0001-linux7.0-flow-iosched-v1.1.0.patch` — creates the
    scheduler source, Kconfig entry, and Makefile target.
 2. For kernels 6.12 – 6.17, also apply
    `patches/0002-linux6.12-flow-iosched-compat.patch`.

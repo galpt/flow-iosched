@@ -35,7 +35,7 @@
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 
-#define FLOW_VERSION "1.0.0"
+#define FLOW_VERSION "1.1.0"
 
 /* ── Lane identifiers ─────────────────────────────────────────────── */
 enum flow_lane {
@@ -845,9 +845,9 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
 
 /* ── Init / Exit ──────────────────────────────────────────────────── */
 
-/* Kernel 7.x init_sched signature: passes a pre-allocated elevator_queue.
- * For older kernels (6.12-, which pass elevator_type), use the
- * patches/ directory for the compatibility patch.                      */
+/* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
+ * For kernels 6.12-6.17 (which pass elevator_type), apply
+ * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
 static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 {
 	struct flow_data *fd;
