@@ -1,25 +1,7 @@
-From c83df4d24e68af4575ddc7a1ba776d201c137567 Mon Sep 17 00:00:00 2001
+From c92c80f6cdeb3331832bc999f1abf38c69a73923 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Thu, 14 May 2026 19:01:06 +0700
+Date: Thu, 14 May 2026 20:14:31 +0700
 Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17
-
-Kernels 6.12 through 6.17 pass (request_queue *, elevator_type *) to
-init_sched, while 6.18+ pass (request_queue *, elevator_queue *).
-
-Changes needed for 6.12-6.17 compatibility:
-  - Replace init_sched signature to take elevator_type * instead of
-    elevator_queue *
-  - Call elevator_alloc() internally to allocate the elevator_queue
-  - Set q->elevator = eq after successful init (the caller on 6.12
-    does not set it)
-  - Add proper error handling with kobject_put on eq->kobj; all error
-    goto targets after elevator_alloc must clean up the eq reference
-
-Order: apply after 0001-linux7.0-flow-iosched-v1.1.0.patch
-
-Other API differences between 6.12-6.17 and 6.18+ are compatible with
-the existing code (limit_depth, insert_requests, init_hctx, exit_hctx,
-init_icq, exit_icq all share the same signatures across these versions).
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---

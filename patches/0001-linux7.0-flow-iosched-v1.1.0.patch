@@ -1,47 +1,28 @@
-From 86a419dc490229082de10d2e142e3b7e0513c045 Mon Sep 17 00:00:00 2001
+From 3f1e8a733485361719fd4ce1951b91f77cd17af9 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Thu, 14 May 2026 19:01:06 +0700
+Date: Thu, 14 May 2026 20:14:31 +0700
 Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v1.1.0
 
 Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
-five priority tiers adapted from the scx_flow CPU scheduling design:
-
-  Tier 0 - Emergency:  Unconditional FIFO bypass for AT_HEAD requests
-  Tier 1 - Reserved:   Low-latency path for synchronous reads/metadata
-  Tier 2 - Latency:    Bounded responsiveness for small random I/O
-  Tier 3 - Shared:     Background throughput for async writes
-  Tier 4 - Contained:  Throttled path for I/O hogs with budget tracking
-
-Key features:
-  - 5-lane priority dispatch with per-hctx starvation tracking
-  - Per-hctx multi-queue dispatch (init_hctx/exit_hctx)
-  - Per-process I/O budget containment with scoring decay
-  - Deadline-sorted rbtrees with quantised grouping for O(log n) lookup
-  - Per-hctx read-biased dispatch with completion-window pacing
-  - Merge-friendly sector-sorted rbtree and bio merge support
-  - ICQ lifecycle hooks for per-process state init/teardown
-  - Sysfs tunable parameters for all scheduling knobs
-  - Lockdep annotations on all internal locking
-
-Kernel 6.18+ init_sched signature (passes pre-allocated elevator_queue *).
-Apply to kernels running 6.18 or later (including CachyOS 7.x).
-For 6.12-6.17 compatibility, apply patches/0002 after this patch.
+five priority tiers adapted from the scx_flow CPU scheduling design.
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/Kconfig.iosched |   24 +
+ block/Kconfig.iosched |   25 +
  block/Makefile        |    1 +
  block/flow-iosched.c  | 1210 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 1235 insertions(+)
- create mode 100644 block/Kconfig.iosched
+ 3 files changed, 1236 insertions(+)
  create mode 100644 block/flow-iosched.c
 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
-new file mode 100644
-index 0000000..7cafef0
---- /dev/null
+index 27f1132..4d227d8 100644
+--- a/block/Kconfig.iosched
 +++ b/block/Kconfig.iosched
-@@ -0,0 +1,24 @@
+@@ -44,4 +44,29 @@ config BFQ_CGROUP_DEBUG
+ 	Enable some debugging help. Currently it exports additional stat
+ 	files in a cgroup which can be useful for debugging.
+ 
++
 +config MQ_IOSCHED_FLOW
 +	tristate "Multi-Lane I/O scheduler (FLOW)"
 +	default m
@@ -66,15 +47,19 @@ index 0000000..7cafef0
 +	  Enable the FLOW I/O scheduler as the default blk-mq I/O scheduler.
 +	  The elevator core will automatically select "flow-iosched" for
 +	  multi-queue block devices during boot.
+ endmenu
 diff --git a/block/Makefile b/block/Makefile
-index e16b6c0..2df831b 100644
+index 65c968a..12d715b 100644
 --- a/block/Makefile
 +++ b/block/Makefile
-@@ -5,3 +5,4 @@ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
+@@ -4,6 +4,7 @@ obj-$(CONFIG_BLK_CGROUP_IOCOST)		+= blk-iocost.o
+ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
  obj-$(CONFIG_MQ_IOSCHED_KYBER)		+= kyber-iosched.o
  obj-$(CONFIG_MQ_IOSCHED_BFQ)		+= bfq-iosched.o
- obj-$(CONFIG_BLK_WBT)			+= blk-wbt.o
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)		+= flow-iosched.o
+ obj-$(CONFIG_BLK_WBT)			+= blk-wbt.o
+ obj-$(CONFIG_BLK_CGROUP_IOLATENCY)	+= blk-iolatency.o
+ obj-$(CONFIG_BLK_INLINE_ENCRYPTION)	+= blk-crypto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
 index 0000000..855fa7a
