@@ -194,16 +194,44 @@ is_version_supported() {
 
 check_deps() {
     local missing=false
-    for cmd in b2sum bc curl make gcc git patch xz; do
-        if ! command -v "$cmd" &>/dev/null; then
-            err "Missing build dependency: $cmd"
+    local pm_install="pacman -S"
+
+    # Detect package manager for user-friendly install hints
+    if command -v apt-get &>/dev/null; then
+        pm_install="apt-get install"
+    elif command -v dnf &>/dev/null; then
+        pm_install="dnf install"
+    elif command -v zypper &>/dev/null; then
+        pm_install="zypper install"
+    fi
+
+    # Tools provided by base-devel or equivalent on most distros
+    for tool in bc curl gcc git make patch xz; do
+        if ! command -v "$tool" &>/dev/null; then
+            # Most of these come from a meta-package
+            if [ "$tool" = "gcc" ] || [ "$tool" = "make" ] || [ "$tool" = "patch" ]; then
+                err "Missing build dependency: $tool (install with: ${pm_install} base-devel, or the equivalent for your distro)"
+            elif [ "$tool" = "bc" ] || [ "$tool" = "curl" ] || [ "$tool" = "git" ] || [ "$tool" = "xz" ]; then
+                err "Missing build dependency: $tool (install with: ${pm_install} ${tool})"
+            fi
             missing=true
         fi
     done
 
-    # Verify kernel build prerequisites
-    if ! command -v "mkinitcpio" &>/dev/null; then
+    # b2sum is provided by coreutils (almost always installed)
+    if ! command -v b2sum &>/dev/null; then
+        err "Missing build dependency: b2sum (install with: ${pm_install} coreutils)"
+        missing=true
+    fi
+
+    # Kernel-specific prerequisites
+    if ! command -v mkinitcpio &>/dev/null; then
         err "Missing: mkinitcpio (install with: pacman -S mkinitcpio)"
+        missing=true
+    fi
+
+    if ! command -v python3 &>/dev/null; then
+        err "Missing: python3 (needed for benchmark chart generation; install with: ${pm_install} python)"
         missing=true
     fi
 
