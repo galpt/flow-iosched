@@ -1,6 +1,6 @@
-From 3f1e8a733485361719fd4ce1951b91f77cd17af9 Mon Sep 17 00:00:00 2001
+From 16815029df859db4e4e6ba246f2ca25e4b92135f Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Thu, 14 May 2026 20:14:31 +0700
+Date: Thu, 14 May 2026 20:18:06 +0700
 Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v1.1.0
 
 Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
@@ -49,17 +49,17 @@ index 27f1132..4d227d8 100644
 +	  multi-queue block devices during boot.
  endmenu
 diff --git a/block/Makefile b/block/Makefile
-index 65c968a..12d715b 100644
+index c65f4da..bc27a56 100644
 --- a/block/Makefile
 +++ b/block/Makefile
-@@ -4,6 +4,7 @@ obj-$(CONFIG_BLK_CGROUP_IOCOST)		+= blk-iocost.o
- obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
- obj-$(CONFIG_MQ_IOSCHED_KYBER)		+= kyber-iosched.o
- obj-$(CONFIG_MQ_IOSCHED_BFQ)		+= bfq-iosched.o
-+obj-$(CONFIG_MQ_IOSCHED_FLOW)		+= flow-iosched.o
- obj-$(CONFIG_BLK_WBT)			+= blk-wbt.o
- obj-$(CONFIG_BLK_CGROUP_IOLATENCY)	+= blk-iolatency.o
- obj-$(CONFIG_BLK_INLINE_ENCRYPTION)	+= blk-crypto.o
+@@ -24,6 +24,7 @@ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
+ obj-$(CONFIG_MQ_IOSCHED_KYBER)	+= kyber-iosched.o
+ bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
+ obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
++obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
+ 
+ obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o \
+ 				   bio-integrity-auto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
 index 0000000..855fa7a
