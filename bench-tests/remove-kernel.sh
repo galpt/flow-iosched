@@ -60,9 +60,9 @@ list_installed() {
     printf '%s\n' "${versions[@]}"
 }
 
-# Get the version of the currently-booted kernel
+# Get the full version of the currently-booted kernel (e.g. 7.0.5-2-cachyos or 7.0.5-flow)
 running_version() {
-    uname -r | sed 's/-.*//'
+    uname -r
 }
 
 # Remove a single kernel version
@@ -71,9 +71,9 @@ remove_version() {
     local running
     running=$(running_version)
 
-    # Never remove the running kernel
-    if [ "$version" = "$running" ]; then
-        die "Cannot remove kernel $version — it is the currently-booted kernel."
+    # Never remove the running kernel — but only if it's actually a flow-iosched kernel
+    if [[ "$running" == *-flow* ]] && [ "${version}" = "$(echo "$running" | sed 's/-.*//')" ]; then
+        die "Cannot remove kernel $version — it is the currently-booted flow-iosched kernel."
     fi
 
     local vmlinuz="/boot/vmlinuz-linux-flow-${version}"
@@ -166,10 +166,10 @@ case "${1}" in
             echo "No flow-iosched test kernels installed."
         else
             echo "Installed flow-iosched kernels:"
+            local running
+            running=$(running_version)
             for v in "${versions[@]}"; do
-                local running
-                running=$(running_version)
-                if [ "$v" = "$running" ]; then
+                if [[ "$running" == *-flow* ]] && [ "${v}" = "$(echo "$running" | sed 's/-.*//')" ]; then
                     echo "  $v (currently booted — cannot remove)"
                 else
                     echo "  $v"
@@ -185,10 +185,10 @@ case "${1}" in
             exit 0
         fi
         echo "The following kernels will be removed:"
+        local running
+        running=$(running_version)
         for v in "${versions[@]}"; do
-            local running
-            running=$(running_version)
-            if [ "$v" = "$running" ]; then
+            if [[ "$running" == *-flow* ]] && [ "${v}" = "$(echo "$running" | sed 's/-.*//')" ]; then
                 echo "  $v (SKIPPED — currently booted)"
             else
                 echo "  $v"
