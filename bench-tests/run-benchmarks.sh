@@ -103,8 +103,14 @@ if [ -z "$SCHEDULERS" ]; then
     done
     SCHEDULERS="${SCHEDULERS# }"
 fi
-# Auto-load flow-iosched module if available (harmless if built-in or absent)
-sudo modprobe flow-iosched 2>/dev/null || true
+# Auto-load flow-iosched module if available on disk
+if modinfo -n flow-iosched &>/dev/null; then
+    if ! lsmod | grep -q "^flow_iosched "; then
+        sudo modprobe flow-iosched 2>/dev/null && \
+            echo "  flow-iosched module: loaded" || \
+            echo "  flow-iosched module: found but failed to load (try: sudo depmod -a)"
+    fi
+fi
 
 echo "Schedulers: $SCHEDULERS"
 echo ""
