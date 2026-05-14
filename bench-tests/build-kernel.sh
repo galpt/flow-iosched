@@ -174,6 +174,7 @@ disk_space_mb() {
 needs_compat_0002() {
     # Kernels 6.12 through 6.17 need 0002 for init_sched signature
     [ "$MAJOR" -lt 6 ] && return 1  # 5.x not supported
+    [ "$MAJOR" -gt 6 ] && return 1  # 7.x+ no compat needed (elevator_alloc has 3 args)
     [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 12 ] && return 1  # < 6.12 not supported
     [ "$MAJOR" -eq 6 ] && [ "$MINOR" -ge 18 ] && return 1  # 6.18+ no compat needed
     return 0  # 6.12-6.17: compat needed
