@@ -670,8 +670,18 @@ main() {
         TARBALL="$FLOW_CACHE_DIR/linux-${MAJOR}.${MINOR}.${PATCH}.tar.xz"
     fi
 
-    # ── Check dependencies ────────────────────────────────────────
-    check_deps
+    # ── Authenticate sudo upfront ────────────────────────────────
+    # This prompts for the password once at the start and keeps the session
+    # alive with a background re-authenticator, so the install step later
+    # does not prompt again — the user can walk away during the build.
+    info "Requesting sudo access (will be kept alive during the build) ..."
+    if ! sudo -v; then
+        die "sudo authentication failed. Installation requires root."
+    fi
+    # Background loop: re-authenticate every 2 minutes (default timeout is 5)
+    while true; do sudo -v; sleep 120; done &
+    SUDO_KEEPER=$!
+    trap 'kill $SUDO_KEEPER 2>/dev/null; wait $SUDO_KEEPER 2>/dev/null' EXIT INT TERM
 
     # ── Step 1: Download ──────────────────────────────────────────
     if [ -f "$TARBALL" ]; then
@@ -704,8 +714,11 @@ main() {
 
     # ── Step 6: Install (needs root) ──────────────────────────────
     if [ "$EUID" -ne 0 ]; then
-        info "Re-invoking with sudo for kernel installation ..."
-        exec sudo "${SCRIPT_DIR}/build-kernel.sh" --install "$VERSION" "$KERNEL_DIR" "$MAJOR" "$MINOR" "$PATCH"
+        info "Installing kernel (sudo session is active — no password needed) ..."
+        sudo -E env "PATH=$PATH" "${SCRIPT_DIR}/build-kernel.sh" --install "$VERSION" "$KERNEL_DIR" "$MAJOR" "$MINOR" "$PATCH" || {
+            die "Installation failed"
+        }
+        exit 0
     fi
 
     install_kernel "$KERNEL_DIR" "$VERSION" "$MAJOR" "$MINOR" "$PATCH"
