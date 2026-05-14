@@ -38,7 +38,10 @@ set -euo pipefail
 # ── Configuration ─────────────────────────────────────────────────────
 # These can be overridden via environment variables
 : "${FLOW_CACHE_DIR:="${XDG_CACHE_HOME:-$HOME/.cache}/flow-iosched/kernels"}"
-: "${FLOW_PATCH_DIR:=""}"          # Auto-detected from script location
+: "${FLOW_PATCH_DIR:=""}"          # Auto-detected from script location; falls back to cloned repo
+: "${FLOW_REPO_DIR:="${XDG_CACHE_HOME:-$HOME/.cache}/flow-iosched/repo"}"
+: "${FLOW_REPO_URL:="https://github.com/galpt/flow-iosched"}"
+: "${FLOW_REPO_BRANCH:="main"}"
 : "${FLOW_MAKE_JOBS:="$(nproc)"}"  # Parallel build jobs
 
 # ── Global state ──────────────────────────────────────────────────────
@@ -61,10 +64,13 @@ die() {
     exit 1
 }
 
-# Auto-detect the patches directory relative to this script
+# Auto-detect the patches directory relative to this script.
+# If not found locally, clones the flow-iosched repo to FLOW_REPO_DIR
+# so the script is fully self-contained.
 find_patch_dir() {
     local script_dir
     script_dir="$(cd "$(dirname "$0")" && pwd)"
+
     # Walk up from script location looking for patches/
     local dir="$script_dir"
     while [ "$dir" != "/" ]; do
@@ -74,8 +80,27 @@ find_patch_dir() {
         fi
         dir="$(dirname "$dir")"
     done
-    # Fall back to script-relative path
-    echo "$script_dir/../patches"
+
+    # Not found locally — clone the repo
+    info "Local patches not found. Cloning flow-iosched repo to $FLOW_REPO_DIR ..."
+    if [ -d "$FLOW_REPO_DIR" ]; then
+        info "Repo already cloned at $FLOW_REPO_DIR, updating ..."
+        cd "$FLOW_REPO_DIR"
+        git pull --ff-only 2>/dev/null || warn "Could not update repo; using cached version"
+        cd "$OLDPWD"
+    else
+        mkdir -p "$(dirname "$FLOW_REPO_DIR")"
+        git clone --branch "$FLOW_REPO_BRANCH" --depth 1 "$FLOW_REPO_URL" "$FLOW_REPO_DIR" || {
+            die "Failed to clone flow-iosched repo from $FLOW_REPO_URL"
+        }
+    fi
+
+    if [ -d "$FLOW_REPO_DIR/patches" ]; then
+        echo "$FLOW_REPO_DIR/patches"
+        return 0
+    fi
+
+    die "Patches not found in cloned repo at $FLOW_REPO_DIR/patches"
 }
 
 # Parse a version string like "7.0.5" into major.minor.patch
