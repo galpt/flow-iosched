@@ -1,6 +1,6 @@
-From 73049fbf6d6899a2cc14ee86ac4f2a1724f72f6c Mon Sep 17 00:00:00 2001
+From 86a419dc490229082de10d2e142e3b7e0513c045 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Thu, 14 May 2026 17:23:22 +0700
+Date: Thu, 14 May 2026 19:01:06 +0700
 Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v1.1.0
 
 Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
@@ -31,8 +31,8 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
  block/Kconfig.iosched |   24 +
  block/Makefile        |    1 +
- block/flow-iosched.c  | 1213 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 1238 insertions(+)
+ block/flow-iosched.c  | 1210 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1235 insertions(+)
  create mode 100644 block/Kconfig.iosched
  create mode 100644 block/flow-iosched.c
 
@@ -67,23 +67,20 @@ index 0000000..7cafef0
 +	  The elevator core will automatically select "flow-iosched" for
 +	  multi-queue block devices during boot.
 diff --git a/block/Makefile b/block/Makefile
-index dc6d9c4..ec66533 100644
+index e16b6c0..2df831b 100644
 --- a/block/Makefile
 +++ b/block/Makefile
-@@ -9,6 +9,7 @@ obj-$(CONFIG_BLK_CGROUP_IOCOST)		+= blk-iocost.o
- obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
+@@ -5,3 +5,4 @@ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
  obj-$(CONFIG_MQ_IOSCHED_KYBER)		+= kyber-iosched.o
  obj-$(CONFIG_MQ_IOSCHED_BFQ)		+= bfq-iosched.o
-+obj-$(CONFIG_MQ_IOSCHED_FLOW)		+= flow-iosched.o
  obj-$(CONFIG_BLK_WBT)			+= blk-wbt.o
- obj-$(CONFIG_BLK_CGROUP_IOLATENCY)	+= blk-iolatency.o
- obj-$(CONFIG_BLK_INLINE_ENCRYPTION)	+= blk-crypto.o
++obj-$(CONFIG_MQ_IOSCHED_FLOW)		+= flow-iosched.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000..de0b659
+index 0000000..855fa7a
 --- /dev/null
 +++ b/block/flow-iosched.c
-@@ -0,0 +1,1213 @@
+@@ -0,0 +1,1210 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Multi-Lane I/O Scheduler (FLOW)
@@ -589,9 +586,6 @@ index 0000000..de0b659
 +
 +	/* Tiers 1-4: deadline-sorted rbtree */
 +	flow_add_to_dl_tree(fd, lane, rq);
-+
-+	/* Track request in the queuelist for dispatch lifecycle */
-+	list_add_tail(&rq->queuelist, &fd->prio_queue[1]);
 +
 +done_insert:
 +	/* Make mergeable requests visible to bio merge */

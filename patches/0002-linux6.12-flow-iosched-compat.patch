@@ -1,6 +1,6 @@
-From 93f119df62379790156e022c4b83510d1beb63d4 Mon Sep 17 00:00:00 2001
+From c83df4d24e68af4575ddc7a1ba776d201c137567 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Thu, 14 May 2026 17:25:11 +0700
+Date: Thu, 14 May 2026 19:01:06 +0700
 Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17
 
 Kernels 6.12 through 6.17 pass (request_queue *, elevator_type *) to
@@ -27,10 +27,10 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  1 file changed, 21 insertions(+), 6 deletions(-)
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index de0b659..e4fd76e 100644
+index 855fa7a..49e1cd1 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -845,18 +845,28 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
+@@ -842,18 +842,28 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
  
  /* ── Init / Exit ──────────────────────────────────────────────────── */
  
@@ -64,7 +64,7 @@ index de0b659..e4fd76e 100644
  	}
  
  	/* Create memory pools */
-@@ -865,7 +875,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+@@ -862,7 +872,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
  					      0, SLAB_HWCACHE_ALIGN, NULL);
  	if (!fd->rq_data_cache) {
  		pr_err("flow-iosched: failed to create rq_data cache\n");
@@ -73,7 +73,7 @@ index de0b659..e4fd76e 100644
  	}
  
  	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-@@ -929,12 +939,17 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+@@ -926,12 +936,17 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
  	fd->queue = q;
  	blk_stat_enable_accounting(q);
  
