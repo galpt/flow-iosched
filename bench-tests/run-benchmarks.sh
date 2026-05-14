@@ -93,15 +93,28 @@ echo "Device:   $DEVICE_LABEL"
 echo "Runtime:  ${RUNTIME}s per test"
 echo ""
 
-# Check if flow-iosched is already available (built into kernel).
-# If not, try to load it as a module — but skip if a stale module file
-# from a different kernel build would conflict with the built-in version.
+# Try to make flow-iosched available: check sysfs, then modprobe, then
+# attempt to write the scheduler directly (matching io-scheduler-setup's
+# approach of actively testing whether the kernel accepts it).
 if ! grep -qw "flow-iosched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
     if modinfo -n flow-iosched &>/dev/null; then
         if ! lsmod 2>/dev/null | grep -q "^flow_iosched "; then
             echo "  Loading flow-iosched module..."
-            sudo modprobe flow-iosched 2>/dev/null || \
-                echo "  flow-iosched: modprobe failed (module may need rebuilding)"
+            sudo modprobe flow-iosched 2>/dev/null || true
+        fi
+    fi
+    # Actively try to set it — this is what io-scheduler-setup does
+    # and it may succeed even when the scheduler isn't in the sysfs list.
+    DEVNAME=$(basename "$DEVICE")
+    SYSFS_PATH="/sys/block/${DEVNAME}/queue/scheduler"
+    if [ -f "$SYSFS_PATH" ]; then
+        CURRENT=$(cat "$SYSFS_PATH" 2>/dev/null || echo "")
+        echo flow-iosched | sudo tee "$SYSFS_PATH" >/dev/null 2>&1 && \
+            echo "  flow-iosched: activated on $DEVNAME"
+        # Restore previous scheduler selection
+        if [ -n "$CURRENT" ]; then
+            CURRENT_SEL=$(echo "$CURRENT" | sed -E 's/.*\[([^]]+)\].*/\1/')
+            echo "$CURRENT_SEL" | sudo tee "$SYSFS_PATH" >/dev/null 2>&1 || true
         fi
     fi
 fi
