@@ -16,6 +16,18 @@ SCHEDULERS="${SCHEDULERS:-none mq-deadline kyber bfq adios flow-iosched}"
 NUM_JOBS=8
 RUNTIME=30
 
+# ── Check dependencies ────────────────────────────────────────────────
+if ! command -v "$FIO" &>/dev/null; then
+    echo "ERROR: fio (flexible I/O tester) is not installed." >&2
+    echo "  Install with: sudo pacman -S fio" >&2
+    exit 1
+fi
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 is not installed (needed for results extraction)." >&2
+    echo "  Install with: sudo pacman -S python" >&2
+    exit 1
+fi
+
 mkdir -p "$RESULTS_DIR"
 
 echo "I/O Scheduler Benchmarks"
