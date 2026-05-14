@@ -371,7 +371,7 @@ apply_patches() {
         patch -p1 -r - < "$patch" 2>/dev/null || {
             die "Failed to apply $patch_name"
         }
-        ((applied++))
+        ((++applied))
     done
 
     info "Applied $applied patch(es) successfully"
