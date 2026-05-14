@@ -122,15 +122,24 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 > workstation. Unforeseen side effects, including data corruption or system
 > instability, are possible at this stage.
 
-For general-purpose desktop and workstation use on SATA SSDs, single-queue
-NVMe, and mid-range multi-queue NVMe (up to approximately 8 hardware queues),
-yes.
+flow-iosched is adapted from the lane-based design of
+[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow),
+a sched_ext CPU scheduler developed alongside this project. scx_flow
+[v2.2.0](https://github.com/sched-ext/scx/commit/00003869) was released in
+April 2026 and has since accumulated several maintenance releases (current:
+v2.2.5). It is used internally at [v.recipes](https://v.recipes) for
+production-adjacent workloads and is considered stable for general-purpose
+desktop and home-server use.
 
-flow-iosched has been reviewed through three rounds of static analysis
-covering locking correctness, memory safety, race conditions, kernel API
-compatibility, and starvation-edge correctness.  Its core scheduling paths
-follow the same bounded design that scx_flow uses for CPU scheduling, adapted
-to the block layer through the blk-mq elevator API.
+flow-iosched targets the same level of robustness, but the block layer
+demands a higher bar: an I/O scheduler operates on user data directly, and
+an undetected bug can cause data corruption or filesystem inconsistency —
+not merely degraded performance. The code has been reviewed through three
+rounds of static analysis covering locking correctness, memory safety, race
+conditions, kernel API compatibility, and starvation-edge correctness, but
+static analysis cannot fully substitute for diverse real-world I/O patterns.
+Until the scheduler has accumulated more field testing across varied
+hardware and workloads, it should be treated as experimental.
 
 > [!CAUTION]
 > On high-end NVMe storage with 16 or more queues, the blk-mq elevator API's
