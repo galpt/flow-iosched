@@ -504,9 +504,6 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	/* Tiers 1-4: deadline-sorted rbtree */
 	flow_add_to_dl_tree(fd, lane, rq);
 
-	/* Track request in the queuelist for dispatch lifecycle */
-	list_add_tail(&rq->queuelist, &fd->prio_queue[1]);
-
 done_insert:
 	/* Make mergeable requests visible to bio merge */
 	if (rq_mergeable(rq)) {
