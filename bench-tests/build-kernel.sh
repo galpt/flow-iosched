@@ -37,14 +37,15 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────
 # These can be overridden via environment variables
-: "${FLOW_CACHE_DIR:="${XDG_CACHE_HOME:-$HOME/.cache}/flow-iosched/kernels"}"
+: "${FLOW_CACHE_DIR:=""}"          # Default: ./tmp/kernels/ (auto-detected from script location)
 : "${FLOW_PATCH_DIR:=""}"          # Auto-detected from script location; falls back to cloned repo
-: "${FLOW_REPO_DIR:="${XDG_CACHE_HOME:-$HOME/.cache}/flow-iosched/repo"}"
+: "${FLOW_REPO_DIR:=""}"          # Default: ./tmp/repo/ (auto-detected from script location)
 : "${FLOW_REPO_URL:="https://github.com/galpt/flow-iosched"}"
 : "${FLOW_REPO_BRANCH:="main"}"
 : "${FLOW_MAKE_JOBS:="$(nproc)"}"  # Parallel build jobs
 
 # ── Global state ──────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERSION=""
 MAJOR=""
 MINOR=""
@@ -53,10 +54,16 @@ KERNEL_DIR=""
 TARBALL=""
 BOOT_PREFIX="flow-iosched"
 
+# Apply default paths relative to the script's tmp/ directory.
+# Users see the downloaded sources and cloned repo in a visible ./tmp/
+# folder next to the script, not scattered in ~/.cache/.
+: "${FLOW_CACHE_DIR:="${SCRIPT_DIR}/tmp/kernels"}"
+: "${FLOW_REPO_DIR:="${SCRIPT_DIR}/tmp/repo"}"
+
 # ── Utilities ─────────────────────────────────────────────────────────
 
 err() { echo "ERROR: $*" >&2; }
-info() { echo "==> $*"; }
+info() { echo "==> $*" >&2; }
 warn() { echo "WARNING: $*" >&2; }
 
 die() {
@@ -68,11 +75,8 @@ die() {
 # If not found locally, clones the flow-iosched repo to FLOW_REPO_DIR
 # so the script is fully self-contained.
 find_patch_dir() {
-    local script_dir
-    script_dir="$(cd "$(dirname "$0")" && pwd)"
-
-    # Walk up from script location looking for patches/
-    local dir="$script_dir"
+    # Walk up from the script directory looking for patches/
+    local dir="$SCRIPT_DIR"
     while [ "$dir" != "/" ]; do
         if [ -d "$dir/patches" ]; then
             echo "$dir/patches"
