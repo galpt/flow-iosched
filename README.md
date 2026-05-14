@@ -14,7 +14,7 @@ CPU scheduler.
 | Lane | Target I/O | Slice / Window | Behaviour |
 |------|------------|----------------|-----------|
 | Emergency | `BLK_MQ_INSERT_AT_HEAD` | Immediate | Bypasses all scheduling |
-| Reserved | Synchronous reads, metadata | configurable (default 250 sectors) | Low-latency path for interactive I/O |
+| Reserved | Synchronous reads, metadata | configurable (default 2048 sectors) | Low-latency path for interactive I/O |
 | Latency | Small random I/O | Short batch window | Bounded responsiveness |
 | Shared | Async writes, best-effort | Configurable batch limit | Background throughput |
 | Contained | Hog-throttled processes | Reduced dispatch rate | Limits I/O-bound interference |
@@ -28,10 +28,14 @@ lane is abandoned entirely.
 Each request is classified into a lane at insertion time based on its
 `cmd_flags` (sync, meta, flush, priority) and the originating process's I/O
 budget balance.  Per-lane deadline-sorted red-black trees (plus two FIFO
-priority queues for the barrier tiers) feed into batch queues.
+priority queues for the barrier tiers) are the primary scheduling state.
 
-Dispatch walks lanes in priority order, pulling requests into batch-sized
-groups before submitting to the device.  Starvation is tracked as round
+Dispatch uses a per-hardware-context fast-path: each hardware context
+maintains its own dispatch list and starvation counters.  The dispatcher
+first attempts a lock-free pop from the per-hctx dispatch list; if empty,
+it walks the global lane trees under a short-lived lock to refill the list.
+This allows independent dispatch across multiple hardware queues while
+preserving the lane priority order.  Starvation is tracked as round
 counters per lane — when a lane accumulates enough consecutive bypasses the
 scheduler force-dispatches from it, ensuring fairness without wall-clock
 timers.
@@ -110,7 +114,7 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 | `sync_budget_sectors` | RW | 2048 | Reserved lane budget per sync dispatch |
 | `async_budget_sectors` | RW | 512 | Shared lane budget per async dispatch |
 | `batch_max_read` | RW | 16 | Max read requests per batch |
-| `batch_max_write` | RW | 32 | Max write requests per batch |
+| `batch_max_write` | RW | 16 | Max write requests per batch |
 | `completion_window_ns` | RW | 8000000 | Dispatch batch window (nanoseconds) |
 | `starvation_max_reserved` | RW | 5 | Reserved starvation rounds before forced rotation |
 | `starvation_max_shared` | RW | 20 | Shared starvation rounds before forced dispatch |
@@ -146,19 +150,20 @@ static analysis cannot fully substitute for diverse real-world I/O patterns.
 Until the scheduler has accumulated more field testing across varied
 hardware and workloads, it should be treated as experimental.
 
-> [!CAUTION]
-> On high-end NVMe storage with 16 or more queues, the blk-mq elevator API's
-> single-queue dispatch model (`QUEUE_FLAG_SQ_SCHED`) becomes a throughput
-> bottleneck.  This is a framework-level constraint shared by **all** blk-mq
-> schedulers (mq-deadline, Kyber, BFQ, ADIOS) — not a flow-iosched limitation.
+> [!NOTE]
+> flow-iosched clears `QUEUE_FLAG_SQ_SCHED` and dispatches independently per
+> hardware context.  This avoids the single-queue dispatch bottleneck that
+> restricts throughput on high-end NVMe with 16 or more queues — a framework
+> constraint that some other blk-mq schedulers (mq-deadline, BFQ) still
+> inherit by using single-queue dispatch mode.
 
 ## Benchmarks
 
 The [`bench-tests/`](https://github.com/galpt/flow-iosched/tree/main/bench-tests)
-directory provides three scripts for building, testing, and cleaning up
-flow-iosched kernels.  Because the `elevator.h` header is not exported for
-out-of-tree module builds, the scheduler must be integrated into a kernel
-tree via the patches and built from source.
+directory provides four scripts for building, testing, analysing, and
+cleaning up flow-iosched kernels.  Because the `elevator.h` header is not
+exported for out-of-tree module builds, the scheduler must be integrated
+into a kernel tree via the patches and built from source.
 
 > [!NOTE]
 > Benchmark results are not yet available for publication.  The workloads
