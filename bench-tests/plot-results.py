@@ -64,6 +64,13 @@ wl_labels = ["Rand Read\n4k", "Rand Write\n4k", "Seq Read\n128k", "Seq Write\n12
 def color_for(sched):
     return COLOR_BY_SCHED.get(sched, FALLBACK_COLORS[len(schedulers) % len(FALLBACK_COLORS)])
 
+def sort_scheds_by(metric, reverse=False):
+    """Return schedulers sorted best-to-worst by a per-scheduler metric.
+    metric(sched) returns a numeric value; reverse=True means higher is better."""
+    return sorted(schedulers,
+                  key=lambda s: metric(s),
+                  reverse=reverse)
+
 def workload_index(wl):
     try:
         return workloads.index(wl)
@@ -92,11 +99,21 @@ def annotate_bars(ax, bars, values, pad_ratio=0.02):
         )
 
 # ── 1. IOPS chart (grouped bars, total IOPS per workload) ────────────
+# Sort schedulers by total IOPS descending (best first)
+def total_iops(sched):
+    total = 0
+    for wl in workloads:
+        match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
+        if match:
+            total += match[0]["read_iops"] + match[0]["write_iops"]
+    return total
+
+sched_order_iops = sort_scheds_by(total_iops, reverse=True)
 fig, ax = plt.subplots(figsize=(10, 5))
 x = np.arange(len(workloads))
-width = 0.85 / max(len(schedulers), 1)
+width = 0.85 / max(len(sched_order_iops), 1)
 
-for i, sched in enumerate(schedulers):
+for i, sched in enumerate(sched_order_iops):
     vals = []
     for wl in workloads:
         match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
@@ -117,8 +134,18 @@ plt.close(fig)
 print(f"  → {CHARTS}/iops.png")
 
 # ── 2. Latency chart (read latency, grouped bars) ────────────────────
+# Sort schedulers by average read latency ascending (best first)
+def avg_read_lat(sched):
+    lats = []
+    for wl in workloads:
+        match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
+        if match and match[0]["read_iops"] > 0:
+            lats.append(match[0]["read_lat_us"])
+    return sum(lats) / len(lats) if lats else float("inf")
+
+sched_order_lat = sort_scheds_by(avg_read_lat, reverse=False)
 fig, ax = plt.subplots(figsize=(10, 5))
-for i, sched in enumerate(schedulers):
+for i, sched in enumerate(sched_order_lat):
     vals = []
     for wl in workloads:
         match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
@@ -141,17 +168,18 @@ fig.savefig(f"{CHARTS}/latency.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/latency.png")
 
-# ── 3. Per-workload IOPS (horizontal bars) ───────────────────────────
+# ── 3. Per-workload IOPS (horizontal bars, sorted best first per workload) ──
 fig, axes = plt.subplots(1, len(workloads), figsize=(14, 4), sharey=True)
 for wi, wl in enumerate(workloads):
     ax = axes[wi]
-    scheds = []
-    iops = []
+    pairs = []
     for sched in schedulers:
         match = [r for r in rows if r["scheduler"] == sched and r["workload"] == wl]
         if match:
-            scheds.append(sched)
-            iops.append(match[0]["read_iops"] + match[0]["write_iops"])
+            pairs.append((sched, match[0]["read_iops"] + match[0]["write_iops"]))
+    pairs.sort(key=lambda p: p[1], reverse=True)
+    scheds = [p[0] for p in pairs]
+    iops = [p[1] for p in pairs]
     bars = ax.barh(range(len(scheds)), iops, color=[color_for(s) for s in scheds])
     ax.set_yticks(range(len(scheds)))
     ax.set_yticklabels(scheds, fontsize=7)
