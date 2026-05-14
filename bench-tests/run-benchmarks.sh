@@ -74,9 +74,22 @@ fi
 
 mkdir -p "$RESULTS_DIR"
 
+# Write metadata for chart annotations
+if [[ "$DEVICE" == /dev/nullb0 ]]; then
+    DEVICE_LABEL="null_blk (synthetic RAM device)"
+else
+    DEVICE_LABEL="$DEVICE"
+fi
+cat > "$RESULTS_DIR/metadata.txt" <<-EOF
+device=$DEVICE
+label=$DEVICE_LABEL
+runtime=${RUNTIME}
+null_blk=$NULLBLK_CLEANUP
+EOF
+
 echo "I/O Scheduler Benchmarks"
 echo "========================"
-echo "Device:   $DEVICE"
+echo "Device:   $DEVICE_LABEL"
 echo "Runtime:  ${RUNTIME}s per test"
 echo ""
 

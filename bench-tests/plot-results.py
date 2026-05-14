@@ -28,6 +28,25 @@ if not os.path.isfile(CSV_PATH):
 
 os.makedirs(CHARTS, exist_ok=True)
 
+# ── Read measurement metadata ───────────────────────────────────────────
+META_PATH = os.path.join(RESULTS, "metadata.txt")
+MEASUREMENT_LABEL = ""
+if os.path.isfile(META_PATH):
+    meta = {}
+    with open(META_PATH) as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                meta[k] = v
+    device_label = meta.get("label", meta.get("device", "unknown"))
+    runtime = meta.get("runtime", "?")
+    if meta.get("null_blk") == "true":
+        MEASUREMENT_LABEL = f"Measured using {device_label} ({runtime}s per test)"
+    else:
+        MEASUREMENT_LABEL = f"Measured using {device_label} ({runtime}s per test)"
+else:
+    MEASUREMENT_LABEL = ""
+
 # ── Color palette matching scx_flow benchmark style ───────────────────
 COLOR_BY_SCHED = {
     "none":         "#4c72b0",
@@ -84,6 +103,12 @@ def fmt_val(v):
         return f"{v:,.0f}"
     return f"{v:.1f}"
 
+def add_measurement_label(fig):
+    """Add a gray italic note at the bottom of the figure describing the test setup."""
+    if MEASUREMENT_LABEL:
+        fig.text(0.5, 0.01, MEASUREMENT_LABEL, ha="center",
+                 fontsize=7, style="italic", color="gray")
+
 def annotate_bars(ax, bars, values, pad_ratio=0.02):
     """Annotate each bar with its value, offset slightly to the right."""
     max_val = max(abs(v) for v in values) if values else 1
@@ -128,7 +153,8 @@ ax.set_xticklabels(wl_labels)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
 ax.margins(x=0.15)
-fig.subplots_adjust(bottom=0.14, right=0.92)
+fig.subplots_adjust(bottom=0.16, right=0.92)
+add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/iops.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/iops.png")
@@ -163,7 +189,8 @@ ax.set_xticklabels(wl_labels)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
 ax.margins(x=0.15)
-fig.subplots_adjust(bottom=0.14, right=0.92)
+fig.subplots_adjust(bottom=0.16, right=0.92)
+add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/latency.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/latency.png")
@@ -190,7 +217,8 @@ for wi, wl in enumerate(workloads):
         ax.text(bar.get_width() * 1.01, bar.get_y() + bar.get_height() / 2,
                 fmt_val(val), va="center", fontsize=7)
 fig.suptitle("Per-Workload IOPS — Higher is Better", fontsize=12)
-fig.tight_layout()
+fig.tight_layout(rect=[0, 0.03, 1, 1])
+add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/per_workload.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/per_workload.png")
@@ -247,7 +275,8 @@ for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
 
 fig.suptitle("I/O Scheduler Comparison — Consolidated Averages\nSorted best to worst per metric",
              fontsize=12, fontweight="bold")
-fig.tight_layout()
+fig.tight_layout(rect=[0, 0.03, 1, 1])
+add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/comparison.png", dpi=150)
 plt.close(fig)
 print(f"  → {CHARTS}/comparison.png")
