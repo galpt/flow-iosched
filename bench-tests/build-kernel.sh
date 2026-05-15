@@ -367,11 +367,21 @@ apply_patches() {
 
     cd "$kernel_dir"
 
-    # Skip patching if the scheduler source is already present
-    # (from a previous run).  This makes re-runs idempotent.
+    # Check if the scheduler source is already present from a previous run.
+    # If so, verify the version matches the current patch.  If the cached
+    # file has a different FLOW_VERSION, delete it to force re-patching.
     if [ -f "block/flow-iosched.c" ]; then
-        info "flow-iosched.c already present — patches already applied, skipping."
-        return 0
+        local cached_version
+        cached_version=$(grep '#define FLOW_VERSION' block/flow-iosched.c 2>/dev/null | cut -d'"' -f2)
+        local patch_version
+        patch_version=$(grep '#define FLOW_VERSION' "$patch_dir"/0001-linux7.0-flow-iosched-*.patch 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [ -n "$cached_version" ] && [ -n "$patch_version" ] && [ "$cached_version" != "$patch_version" ]; then
+            info "Cached flow-iosched v$cached_version differs from patch v$patch_version — re-patching."
+            rm -f block/flow-iosched.c
+        else
+            info "flow-iosched.c already present — patches already applied, skipping."
+            return 0
+        fi
     fi
 
     for patch in "${patches_to_apply[@]}"; do
@@ -385,7 +395,10 @@ apply_patches() {
         # and git am prompts interactively when applied to a tree that has
         # a git repository in a parent directory.
         patch -p1 -N -r - < "$patch" 2>/dev/null || {
-            die "Failed to apply $patch_name"
+            local exit_code=$?
+            # Show the actual error (re-apply without suppressing stderr)
+            patch -p1 -N --dry-run < "$patch" 2>&1 | head -20
+            die "Failed to apply $patch_name (exit $exit_code)"
         }
         ((++applied))
     done

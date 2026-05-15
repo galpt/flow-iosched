@@ -63,11 +63,11 @@ index c65f4da..bc27a56 100644
  obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
  
- obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o \\
+ obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o \
  				   bio-integrity-auto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000..cd601f060f7ff533ca9607ddf17bd6fe497e4d15
+index 0000000..cd601f0
 --- /dev/null
 +++ b/block/flow-iosched.c
 @@ -0,0 +1,1766 @@
