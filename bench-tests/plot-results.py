@@ -195,7 +195,7 @@ for wi, wl in enumerate(workloads):
         for row in rows if row["workload"] == wl
     )
     if all_zero:
-        ax.text(x[wi] + width * len(schedulers) / 2, 0.08,
+        ax.text(x[wi] + width * (len(schedulers) - 1) / 2, 0.08,
                 "write-only\n(no reads)", ha="center", va="bottom",
                 fontsize=6, color="gray", transform=ax.get_xaxis_transform())
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
