@@ -16,8 +16,8 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
  block/Kconfig.iosched |   25 +
  block/Makefile        |    1 +
- block/flow-iosched.c  | 1759 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 1785 insertions(+)
+ block/flow-iosched.c  | 1766 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1792 insertions(+)
 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
 index 27f1132..4d227d8 100644
@@ -63,14 +63,14 @@ index c65f4da..bc27a56 100644
  obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
  
- obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o \
+ obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o \\
  				   bio-integrity-auto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000..a32a463ec440eeb73880abcfaa46214d28b0d7fc
+index 0000000..cd601f060f7ff533ca9607ddf17bd6fe497e4d15
 --- /dev/null
 +++ b/block/flow-iosched.c
-@@ -0,0 +1,1759 @@
+@@ -0,0 +1,1766 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Multi-Lane I/O Scheduler (FLOW) — v2.0.0
@@ -108,6 +108,13 @@ index 0000000..a32a463ec440eeb73880abcfaa46214d28b0d7fc
 +#include <linux/timekeeping.h>
 +#include <linux/timer.h>
 +#include <linux/atomic.h>
++
++/*
++ * Kernel 7.0.x renamed timer functions. Compat for older kernels.
++ */
++#ifndef timer_delete_sync
++#define timer_delete_sync del_timer_sync
++#endif
 +
 +#include "blk.h"
 +#include "blk-mq.h"
@@ -1515,7 +1522,7 @@ index 0000000..a32a463ec440eeb73880abcfaa46214d28b0d7fc
 +	struct flow_data *fd = e->elevator_data;
 +
 +	/* Delete autotune timer before draining scheduler state */
-+	del_timer_sync(&fd->autotune_timer);
++	timer_delete_sync(&fd->autotune_timer);
 +
 +	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
 +	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));

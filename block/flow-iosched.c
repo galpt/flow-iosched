@@ -36,6 +36,13 @@
 #include <linux/timer.h>
 #include <linux/atomic.h>
 
+/*
+ * Kernel 7.0.x renamed timer functions. Compat for older kernels.
+ */
+#ifndef timer_delete_sync
+#define timer_delete_sync del_timer_sync
+#endif
+
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
@@ -1442,7 +1449,7 @@ static void flow_exit_sched(struct elevator_queue *e)
 	struct flow_data *fd = e->elevator_data;
 
 	/* Delete autotune timer before draining scheduler state */
-	del_timer_sync(&fd->autotune_timer);
+	timer_delete_sync(&fd->autotune_timer);
 
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
