@@ -1,5 +1,5 @@
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index dcf5f8c..5f7ae0f 100644
+index dcf5f8c..cefb174 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
 @@ -287,7 +287,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
@@ -171,7 +171,7 @@ index dcf5f8c..5f7ae0f 100644
  }
  
  /* ── Prepare / finish request lifecycle ───────────────────────────── */
-@@ -644,15 +673,35 @@ static bool flow_fill_dispatch_locked(struct flow_data *fd,
+@@ -644,15 +673,36 @@ static bool flow_fill_dispatch_locked(struct flow_data *fd,
  			break;
  
  		/* Increment starvation for all lanes below this one */
@@ -183,10 +183,11 @@ index dcf5f8c..5f7ae0f 100644
 +		}
  
  		rq = rd->rq;
- 
+-
 -		/* Enforce per-hctx batch limits */
--		u8 optype = flow_optype(rq);
+ 		u8 optype = flow_optype(rq);
 -		if (optype == FLOW_READ && rd_count >= fd->batch_max_read)
++
 +		/* Enforce per-hctx batch limits — remove and reinsert to advance cursor */
 +		if (optype == FLOW_READ && rd_count >= fd->batch_max_read) {
 +			flow_remove_request(fd, rq, rq->q);
@@ -197,7 +198,7 @@ index dcf5f8c..5f7ae0f 100644
 +				spin_unlock(&khd->lock);
 +				if (optype == FLOW_READ) rd_count++;
 +			}
-+			continue;
+ 			continue;
 +		}
 +		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write) {
 +			flow_remove_request(fd, rq, rq->q);
@@ -207,12 +208,12 @@ index dcf5f8c..5f7ae0f 100644
 +				spin_unlock(&khd->lock);
 +				if (optype == FLOW_WRITE) wr_count++;
 +			}
- 			continue;
++			continue;
 +		}
  		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write)
  			continue;
  
-@@ -801,7 +850,7 @@ static bool flow_allow_merge(struct request_queue *q, struct request *rq,
+@@ -801,7 +851,7 @@ static bool flow_allow_merge(struct request_queue *q, struct request *rq,
  
  	/* reject merges that cross lane boundaries (avoids priority inversion) */
  	if (rd) {
@@ -221,7 +222,7 @@ index dcf5f8c..5f7ae0f 100644
  		u8 bio_lane;
  
  		/* Determine what lane the bio would land in */
-@@ -944,6 +993,43 @@ static void flow_exit_sched(struct elevator_queue *e)
+@@ -944,6 +994,43 @@ static void flow_exit_sched(struct elevator_queue *e)
  	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
  	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
  
@@ -265,7 +266,7 @@ index dcf5f8c..5f7ae0f 100644
  	mempool_destroy(fd->rq_data_pool);
  	kmem_cache_destroy(fd->rq_data_cache);
  	kmem_cache_destroy(fd->dl_group_cache);
-@@ -980,7 +1066,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+@@ -980,7 +1067,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
  	if (!khd)
  		return;
  
