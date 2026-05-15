@@ -16,8 +16,8 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
  block/Kconfig.iosched |   25 +
  block/Makefile        |    1 +
- block/flow-iosched.c  | 1754 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 1780 insertions(+)
+ block/flow-iosched.c  | 1759 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1785 insertions(+)
 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
 index 27f1132..4d227d8 100644
@@ -29,14 +29,16 @@ index 27f1132..4d227d8 100644
  
 +
 +config MQ_IOSCHED_FLOW
-+	tristate "Multi-Lane I/O scheduler (FLOW)"
++	tristate "Multi-Lane I/O scheduler (FLOW) v2.0"
 +	default m
 +	help
 +	  The Multi-Lane I/O scheduler (FLOW) is a blk-mq I/O scheduler with
 +	  five priority tiers adapted from the scx_flow CPU scheduling design.
 +	  It provides deadline-sorted dispatch, per-process I/O budget
-+	  containment, and starvation-safe batching for modern multi-queue
-+	  block devices.
++	  containment with proportional completion-based refill, lock-free
++	  atomic per-ICQ access, geometric signal decay (latency credit/debt),
++	  per-process IO profiles, a starvation quota mechanism, per-hctx
++	  metrics, and a 3-mode autotuner.
 +
 +	  Tier 0 (Emergency):  Unconditional bypass for BLK_MQ_INSERT_AT_HEAD
 +	  Tier 1 (Reserved):   Low-latency path for synchronous reads/metadata
@@ -67,17 +69,20 @@ index c65f4da..bc27a56 100644
  				   bio-integrity-auto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000..b5b73a533f2e
+index 0000000..a32a463ec440eeb73880abcfaa46214d28b0d7fc
 --- /dev/null
 +++ b/block/flow-iosched.c
-@@ -0,0 +1,1754 @@
+@@ -0,0 +1,1759 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * Multi-Lane I/O Scheduler (FLOW)
++ * Multi-Lane I/O Scheduler (FLOW) — v2.0.0
 + *
 + * A multi-lane I/O scheduler adapted from the scx_flow CPU scheduling design.
-+ * Provides five priority tiers with deadline-sorted dispatch, per-process
-+ * budget containment, and starvation-safe batching.
++ * Five priority tiers, deadline-sorted rbtree dispatch, per-process budget
++ * containment with proportional completion-based refill, lock-free atomic
++ * per-ICQ access, bounded geometric signal decay (latency credit/debt),
++ * per-process IO profiles, starvation quota mechanism, per-hctx metrics,
++ * and a 3-mode autotuner.
 + *
 + * Tier 0 - Emergency:  prio_queue[0], unconditional FIFO bypass
 + * Tier 1 - Reserved:   deadline-sorted rbtree, sync reads + REQ_META/PRIO
@@ -210,9 +215,9 @@ index 0000000..b5b73a533f2e
 +	atomic_t	latency_allowance;	/* atomic — credit for latency lane 0..4 */
 +	atomic_t	latency_pressure;	/* atomic — debt for urgency 0..4 */
 +	atomic_t	io_profile;		/* atomic — profile bits (enum flow_io_profile) */
-+	u64		last_io_completed;	/* smp_store_release / smp_load_acquire */
-+	u64		last_io_inserted;	/* same */
-+	u64		last_io_profile_update;	/* last profile recompute timestamp */
++	atomic64_t	last_io_completed;	/* last completion timestamp */
++	atomic64_t	last_io_inserted;	/* last insertion timestamp */
++	atomic64_t	last_io_profile_update;	/* last profile recompute timestamp */
 +};
 +
 +/* ── Per-request-queue scheduler data ─────────────────────────────── */
@@ -290,16 +295,16 @@ index 0000000..b5b73a533f2e
 +	/* Back-pointer */
 +	struct blk_mq_hw_ctx	*hctx;
 +
-+	/* Per-hctx metrics (no global atomics — aggregated by autotune timer) */
-+	u64			m_reserved_dispatch;
-+	u64			m_latency_dispatch;
-+	u64			m_shared_dispatch;
-+	u64			m_contained_dispatch;
-+	u64			m_contained_rescue;
-+	u64			m_shared_rescue;
-+	u64			m_budget_exhaustions;
-+	u64			m_latency_debt_raises;
-+	u64			m_hog_containments;
++	/* Per-hctx metrics (atomic64_t — written under fd->lock, read under khd->lock) */
++	atomic64_t		m_reserved_dispatch;
++	atomic64_t		m_latency_dispatch;
++	atomic64_t		m_shared_dispatch;
++	atomic64_t		m_contained_dispatch;
++	atomic64_t		m_contained_rescue;
++	atomic64_t		m_shared_rescue;
++	atomic64_t		m_budget_exhaustions;
++	atomic64_t		m_latency_debt_raises;
++	atomic64_t		m_hog_containments;
 +};
 +
 +/* ── Helpers ──────────────────────────────────────────────────────── */
@@ -454,7 +459,7 @@ index 0000000..b5b73a533f2e
 +		profile |= IO_PROFILE_SYNC_DOMINANT;
 +
 +	atomic_set(&ficq->io_profile, profile);
-+	smp_store_release(&ficq->last_io_profile_update, ktime_get_ns());
++	atomic64_set(&ficq->last_io_profile_update, ktime_get_ns());
 +}
 +
 +/* ── Lane assignment ──────────────────────────────────────────────── */
@@ -527,7 +532,7 @@ index 0000000..b5b73a533f2e
 +	 */
 +	old_budget = atomic64_read(&ficq->io_budget_sectors);
 +	if (old_budget < budget &&
-+	    ktime_get_ns() - smp_load_acquire(&ficq->last_io_completed) >
++	    ktime_get_ns() - atomic64_read(&ficq->last_io_completed) >
 +		FLOW_BUDGET_REFRESH_NS) {
 +		old_budget = atomic64_add_return(budget, &ficq->io_budget_sectors);
 +		s64 cap = budget * 4;
@@ -537,7 +542,7 @@ index 0000000..b5b73a533f2e
 +					    FLOW_HOG_SCORE_DECAY_SHIFT);
 +	}
 +
-+	smp_store_release(&ficq->last_io_inserted, ktime_get_ns());
++	atomic64_set(&ficq->last_io_inserted, ktime_get_ns());
 +
 +	/* Consume budget atomically */
 +	old_budget = atomic64_sub_return((s64)block_sectors,
@@ -550,8 +555,8 @@ index 0000000..b5b73a533f2e
 +					  FLOW_HOG_SCORE_MAX);
 +		/* Track exhaustion for autotune metrics */
 +		struct flow_hctx_data *khd = hctx->sched_data;
-+		if (khd && khd->m_budget_exhaustions < U64_MAX)
-+			khd->m_budget_exhaustions++;
++		if (khd)
++			atomic64_inc(&khd->m_budget_exhaustions);
 +	}
 +
 +	/* Return true if request should be contained */
@@ -766,7 +771,7 @@ index 0000000..b5b73a533f2e
 +		if (ficq) {
 +			contained = flow_check_budget_and_contain(ficq, rq, fd, hctx);
 +			/* Recompute IO profile from recent budget/signal state */
-+			if (ktime_get_ns() - smp_load_acquire(&ficq->last_io_profile_update) >
++			if (ktime_get_ns() - atomic64_read(&ficq->last_io_profile_update) >
 +			    NSEC_PER_MSEC)
 +				flow_recompute_io_profile(ficq, rq, fd);
 +		}
@@ -879,9 +884,9 @@ index 0000000..b5b73a533f2e
 +	atomic_set(&ficq->latency_allowance, 0);
 +	atomic_set(&ficq->latency_pressure, 0);
 +	atomic_set(&ficq->io_profile, 0);
-+	smp_store_release(&ficq->last_io_completed, ktime_get_ns());
-+	smp_store_release(&ficq->last_io_inserted, ktime_get_ns());
-+	smp_store_release(&ficq->last_io_profile_update, ktime_get_ns());
++	atomic64_set(&ficq->last_io_completed, ktime_get_ns());
++	atomic64_set(&ficq->last_io_inserted, ktime_get_ns());
++	atomic64_set(&ficq->last_io_profile_update, ktime_get_ns());
 +}
 +
 +static void flow_exit_icq(struct io_cq *icq)
@@ -899,9 +904,9 @@ index 0000000..b5b73a533f2e
 +	atomic_set(&ficq->latency_allowance, 0);
 +	atomic_set(&ficq->latency_pressure, 0);
 +	atomic_set(&ficq->io_profile, 0);
-+	smp_store_release(&ficq->last_io_completed, 0);
-+	smp_store_release(&ficq->last_io_inserted, 0);
-+	smp_store_release(&ficq->last_io_profile_update, 0);
++	atomic64_set(&ficq->last_io_completed, 0);
++	atomic64_set(&ficq->last_io_inserted, 0);
++	atomic64_set(&ficq->last_io_profile_update, 0);
 +}
 +
 +/* ── Per-hctx dispatch ──────────────────────────────────────────── */
@@ -1010,26 +1015,22 @@ index 0000000..b5b73a533f2e
 +		/* Update per-hctx metrics counters */
 +		switch (lane) {
 +		case FLOW_LANE_RESERVED:
-+			khd->m_reserved_dispatch++;
++			atomic64_inc(&khd->m_reserved_dispatch);
 +			break;
 +		case FLOW_LANE_LATENCY:
-+			khd->m_latency_dispatch++;
++			atomic64_inc(&khd->m_latency_dispatch);
 +			break;
 +		case FLOW_LANE_SHARED:
-+			khd->m_shared_dispatch++;
-+			/* Count as rescue if higher-priority lanes have pending work */
++			atomic64_inc(&khd->m_shared_dispatch);
 +			if (flow_first_rq_for_lane(fd, FLOW_LANE_RESERVED) ||
 +			    flow_first_rq_for_lane(fd, FLOW_LANE_LATENCY))
-+				khd->m_shared_rescue++;
++				atomic64_inc(&khd->m_shared_rescue);
 +			break;
 +		case FLOW_LANE_CONTAINED:
-+			khd->m_contained_dispatch++;
-+			/* Detect rescue dispatch: count as rescue if higher-priority
-+			 * lanes have pending work (starvation or quota override).
-+			 */
++			atomic64_inc(&khd->m_contained_dispatch);
 +			if (flow_first_rq_for_lane(fd, FLOW_LANE_RESERVED) ||
 +			    flow_first_rq_for_lane(fd, FLOW_LANE_LATENCY))
-+				khd->m_contained_rescue++;
++				atomic64_inc(&khd->m_contained_rescue);
 +			break;
 +		}
 +
@@ -1164,9 +1165,9 @@ index 0000000..b5b73a533f2e
 +	/*
 +	 * Lock-free atomic access — this runs from softirq completion context
 +	 * and may race with flow_insert_request on another CPU. All per-ICQ
-+	 * fields are atomic or use smp_store_release/smp_load_acquire.
++	 * fields are atomic_t or atomic64_t.
 +	 */
-+	smp_store_release(&ficq->last_io_completed, now);
++	atomic64_set(&ficq->last_io_completed, now);
 +
 +	/*
 +	 * Primary budget refill: return (completed_sectors / FLOW_REFILL_DIV)
@@ -1210,7 +1211,7 @@ index 0000000..b5b73a533f2e
 +					  FLOW_LATENCY_DEBT_MAX);
 +
 +	/* Recompute IO profile periodically */
-+	if (now - smp_load_acquire(&ficq->last_io_profile_update) > NSEC_PER_MSEC)
++	if (now - atomic64_read(&ficq->last_io_profile_update) > NSEC_PER_MSEC)
 +		flow_recompute_io_profile(ficq, rq, rq->q->elevator->elevator_data);
 +}
 +
@@ -1315,20 +1316,26 @@ index 0000000..b5b73a533f2e
 +		if (!khd)
 +			continue;
 +		guard(spinlock_irqsave)(&khd->lock);
-+		total_reserved	+= khd->m_reserved_dispatch;
-+		total_latency	+= khd->m_latency_dispatch;
-+		total_shared	+= khd->m_shared_dispatch;
-+		total_contained	+= khd->m_contained_dispatch;
-+		total_rescue	+= khd->m_contained_rescue + khd->m_shared_rescue;
-+		khd->m_reserved_dispatch = 0;
-+		khd->m_latency_dispatch = 0;
-+		khd->m_shared_dispatch = 0;
-+		khd->m_contained_dispatch = 0;
-+		khd->m_contained_rescue = 0;
-+		khd->m_shared_rescue = 0;
-+		khd->m_budget_exhaustions = 0;
-+		khd->m_latency_debt_raises = 0;
-+		khd->m_hog_containments = 0;
++		/*
++		 * Metrics counters are atomic64_t — race-free between
++		 * dispatch (atomic64_inc under fd->lock) and the aggregation
++		 * here (atomic64_read/atomic64_set under khd->lock).
++		 */
++		total_reserved	+= atomic64_read(&khd->m_reserved_dispatch);
++		total_latency	+= atomic64_read(&khd->m_latency_dispatch);
++		total_shared	+= atomic64_read(&khd->m_shared_dispatch);
++		total_contained	+= atomic64_read(&khd->m_contained_dispatch);
++		total_rescue	+= atomic64_read(&khd->m_contained_rescue) +
++				   atomic64_read(&khd->m_shared_rescue);
++		atomic64_set(&khd->m_reserved_dispatch, 0);
++		atomic64_set(&khd->m_latency_dispatch, 0);
++		atomic64_set(&khd->m_shared_dispatch, 0);
++		atomic64_set(&khd->m_contained_dispatch, 0);
++		atomic64_set(&khd->m_contained_rescue, 0);
++		atomic64_set(&khd->m_shared_rescue, 0);
++		atomic64_set(&khd->m_budget_exhaustions, 0);
++		atomic64_set(&khd->m_latency_debt_raises, 0);
++		atomic64_set(&khd->m_hog_containments, 0);
 +	}
 +
 +	total_dispatch = total_reserved + total_latency +
@@ -1579,7 +1586,7 @@ index 0000000..b5b73a533f2e
 +	memset(khd->starvation_rounds, 0, sizeof(khd->starvation_rounds));
 +	khd->high_priority_burst_rounds = 0;
 +	khd->hctx = hctx;
-+	memset(&khd->m_reserved_dispatch, 0, sizeof(u64) * 9);
++	/* All atomic64_t metrics counters are already 0 from kzalloc. */
 +
 +	hctx->sched_data = khd;
 +	return 0;
