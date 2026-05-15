@@ -1,5 +1,5 @@
 config MQ_IOSCHED_FLOW
-	tristate "Multi-Lane I/O scheduler (FLOW) v2.0"
+	tristate "Multi-Lane I/O scheduler (FLOW)"
 	default m
 	help
 	  The Multi-Lane I/O scheduler (FLOW) is a blk-mq I/O scheduler with

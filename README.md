@@ -131,7 +131,7 @@ Reserved = 5, Shared = 20, Contained = 30."]
 flow_init_icq() initialises budget to
 2048 sectors (atomic64_set), all other
 fields to 0 via atomic_set, and timestamps
-via smp_store_release. flow_exit_icq()
+via atomic64_set. flow_exit_icq()
 resets each field atomically (no memset).
 Both are NULL-guarded. Completion path
 uses lock-free atomics; insertion path
@@ -255,7 +255,7 @@ then add the Kconfig and Makefile entries:
 ```c
 // Kconfig (in block/Kconfig.iosched):
 config MQ_IOSCHED_FLOW
-    tristate "Multi-Lane I/O scheduler (FLOW) v2.0"
+    tristate "Multi-Lane I/O scheduler (FLOW)"
     default m
     help
       Multi-lane I/O scheduler adapted from scx_flow. Provides five
