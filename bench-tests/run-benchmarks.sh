@@ -8,8 +8,8 @@
 #
 # Uses null_blk (virtual RAM device) by default — safe for scheduler
 # comparisons without risking real data.  For real hardware measurements,
-# override DEVICE:
-#   DEVICE=/dev/nvme1n1 sudo ./bench-tests/run-benchmarks.sh
+# pass the device path as the first argument:
+#   sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
 #
 # See the README for what null_blk numbers mean vs physical devices.
 
@@ -33,8 +33,10 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 # ── Resolve device ────────────────────────────────────────────────────
-# Default to null_blk if not specified (safe for scheduler development)
-DEVICE="${DEVICE:-/dev/nullb0}"
+# Accept DEVICE as positional argument or env var (positional overrides env)
+# Using a positional arg avoids sudo stripping the DEVICE environment variable.
+DEVICE="${1:-${DEVICE:-/dev/nullb0}}"
+[ $# -gt 0 ] && shift  # consume positional arg so other args can be added later
 
 # If using null_blk, auto-load and set up cleanup
 NULLBLK_CLEANUP=false
@@ -228,3 +230,11 @@ echo ""
 if $NULLBLK_CLEANUP; then
     echo "null_blk device will be removed automatically on exit."
 fi
+echo "Usage: sudo ./run-benchmarks.sh [device]
+  device  Block device path (default: /dev/nullb0)
+  DEVICE  Environment variable also accepted (positional arg takes priority)
+
+  Examples:
+    sudo ./run-benchmarks.sh                    # null_blk (synthetic)
+    sudo ./run-benchmarks.sh /dev/nvme0n1p1     # real partition
+    DEVICE=/dev/nvme0n1p1 sudo ./run-benchmarks.sh  # alt: env var"
