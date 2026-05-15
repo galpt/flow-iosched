@@ -68,19 +68,26 @@ cmd_status() {
         err "Module not installed"
     fi
 
-    # Module loaded?
+    # Module loaded?  Check whether the scheduler appears in any block
+    # device's list (more reliable than lsmod on tainted-module kernels).
     local modname="${MODULE_NAME//-/_}"
-    if lsmod | grep -q "^$modname"; then
-        ok "Module loaded in kernel"
+    local scheduler_seen=false
+    for dev in /sys/block/*/queue/scheduler; do
+        if grep -q "flow-iosched" "$dev" 2>/dev/null; then
+            scheduler_seen=true
+            break
+        fi
+    done
+    if $scheduler_seen; then
+        ok "Module loaded (flow-iosched available as I/O scheduler)"
     else
-        err "Module not loaded"
+        err "Module not loaded or scheduler not registered"
         local dmesg_hint
         dmesg_hint=$(dmesg 2>/dev/null | grep -i "$modname\|$MODULE_NAME" | tail -5)
         if [ -n "$dmesg_hint" ]; then
             echo "  Recent dmesg entries:"
             echo "$dmesg_hint" | sed 's/^/    /'
         fi
-        # If installed, offer to load it
         if [ -f "/lib/modules/$(uname -r)/extra/$MODULE_NAME.ko" ]; then
             echo "  Run 'sudo $0' without arguments to load and activate."
         fi
