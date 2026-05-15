@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Multi-Lane I/O Scheduler (FLOW)
+ * Multi-Lane I/O Scheduler (FLOW) — v2.0.0
  *
  * A multi-lane I/O scheduler adapted from the scx_flow CPU scheduling design.
- * Provides five priority tiers with deadline-sorted dispatch, per-process
- * budget containment, and starvation-safe batching.
+ * Five priority tiers, deadline-sorted rbtree dispatch, per-process budget
+ * containment with proportional completion-based refill, lock-free atomic
+ * per-ICQ access, bounded geometric signal decay (latency credit/debt),
+ * per-process IO profiles, starvation quota mechanism, per-hctx metrics,
+ * and a 3-mode autotuner.
  *
  * Tier 0 - Emergency:  prio_queue[0], unconditional FIFO bypass
  * Tier 1 - Reserved:   deadline-sorted rbtree, sync reads + REQ_META/PRIO

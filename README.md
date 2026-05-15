@@ -68,7 +68,8 @@ Deadline = start_time_ns (FIFO order)."]
 
 REQ_SYNC writes and small I/O <= 4 KB.
 Deadline = start_time_ns + 2 ms.
-Budget refills when idle > 100 ms."]
+Budget refills on completion
+(sectors/100) or idle > 100 ms."]
 
     F1["Shared
 
@@ -79,8 +80,9 @@ capped at nr_requests / 3."]
     G1["Contained
 
 Processes with containment_score >= 100
-(hog-throttled). Score decays by 8
-on each idle refill tick."]
+(hog-throttled). Score decays
+geometrically on each completion.
+Raised via bounded CAS on exhaustion."]
 
     H1["4. Per-hctx Dispatch
 
@@ -219,11 +221,10 @@ from scx_flow.  No sysfs intervention is needed for common workloads.
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
 > [!IMPORTANT]
-> The existing `patches/0001` and `patches/0003` are for the v1.1.0 source and are
-> **not compatible** with v2.0.0.  For v2.0.0, the scheduler ships as a single
-> source file (`block/flow-iosched.c`) — use the standalone module build or
-> apply the compat patch for 6.12–6.17 if needed.  New integrated patches for
-> v2.0.0 will be published in a future release.
+> The `patches/` directory ships `0001-linux7.0-flow-iosched-v2.0.0.patch`
+> for kernel 7.0.x / 6.18+ and `0002-linux6.12-flow-iosched-compat.patch`
+> for kernels 6.12–6.17.  Apply 0001 first, then 0002 for 6.12–6.17.
+> The old v1.1.0 patches have been removed — v2.0.0 subsumes all fixes.
 
 ### Building as a Standalone Module (Recommended)
 
@@ -254,12 +255,14 @@ then add the Kconfig and Makefile entries:
 ```c
 // Kconfig (in block/Kconfig.iosched):
 config MQ_IOSCHED_FLOW
-    tristate "Multi-Lane I/O scheduler (FLOW)"
+    tristate "Multi-Lane I/O scheduler (FLOW) v2.0"
     default m
     help
       Multi-lane I/O scheduler adapted from scx_flow. Provides five
       priority tiers with deadline-sorted dispatch, per-process budget
-      containment, latency credit/debt tracking, and 3-mode autotuning.
+      containment with completion-based refill, lock-free atomics,
+      geometric signal decay, IO profiles, starvation quota, and
+      3-mode autotuner.
 
 // Makefile (in block/Makefile):
 obj-$(CONFIG_MQ_IOSCHED_FLOW) += flow-iosched.o

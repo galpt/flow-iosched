@@ -12,9 +12,9 @@
 #   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
 #
 # Supported kernel ranges:
-#   7.0.x         — applies 0001 + 0003 patch
-#   6.18 – 6.19   — applies 0001 + 0003 patch
-#   6.12 – 6.17   — applies 0001 + 0002 + 0003 patch
+#   7.0.x         — applies 0001 (v2.0.0) patch
+#   6.18 – 6.19   — applies 0001 (v2.0.0) patch
+#   6.12 – 6.17   — applies 0001 (v2.0.0) + 0002 compat patches
 #   5.18 – 6.11   — NOT supported (elevator op API differs)
 #
 # The script:
@@ -343,17 +343,20 @@ apply_patches() {
     local patches_to_apply=()
 
     # 0001 is always applied for all supported versions
-    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch" ]; then
-        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch")
-        # 0003 fix patch (applies on top of 0001)
-        if [ -f "$patch_dir/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch" ]; then
-            patches_to_apply+=("$patch_dir/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch")
-        fi
+    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v2.0.0.patch" ]; then
+        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v2.0.0.patch")
     else
-        die "0001 patch not found at $patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch"
+        # Fallback: try to match any 0001 patch (user may have renamed it)
+        local fallback
+        fallback=$(ls "$patch_dir"/0001-linux7.0-flow-iosched-*.patch 2>/dev/null | head -1)
+        if [ -n "$fallback" ]; then
+            patches_to_apply+=("$fallback")
+        else
+            die "0001 patch not found in $patch_dir — expected 0001-linux7.0-flow-iosched-v2.0.0.patch"
+        fi
     fi
 
-    # 0002 is needed for 6.12-6.17
+    # 0002 compat is needed for 6.12-6.17
     if needs_compat_0002; then
         if [ -f "$patch_dir/0002-linux6.12-flow-iosched-compat.patch" ]; then
             patches_to_apply+=("$patch_dir/0002-linux6.12-flow-iosched-compat.patch")
