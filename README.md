@@ -352,19 +352,90 @@ flow-iosched kernels.  Because the `elevator.h` header is not exported for
 out-of-tree module builds, the scheduler must be integrated into a kernel
 tree via the patches and built from source.
 
-The [`benchmark-runs/`](https://github.com/galpt/flow-iosched/tree/main/benchmark-runs) directory contains results and charts from the
-v1.1.0-era test environment (described below).  These results were produced
-before the budget system was redesigned in v2.0.0 and are **not representative**
-of the current scheduler's behaviour.  Version 2.0.0 benchmarks will be
-published once collected.
+The [`benchmark-runs/`](https://github.com/galpt/flow-iosched/tree/main/benchmark-runs) directory contains results and charts from the test
+environment described below.
 
-### Results (v1.1.0 — superseded)
+### Results
 
 All five workloads were run for 30 seconds each per scheduler on two device
-types.  These numbers pre-date the v2.0.0 budget redesign; flow-iosched's
-performance in these charts was measured with the broken budget system that
-effectively degenerated to a single FIFO queue.  The charts are retained for
-reference and will be replaced once v2.0.0 benchmarks are available.
+types.  The charts below show each scheduler's throughput and latency.
+
+#### null_blk (synthetic RAM device)
+
+null_blk is a kernel virtual block device with near-zero I/O latency (memory
+copy only).  Results measure the scheduler's CPU overhead and dispatch logic
+without the confounding factor of physical device latency.  The absolute IOPS
+numbers are not representative of real hardware, but the comparisons between
+schedulers are useful: a scheduler that is slower on null_blk is doing more
+work per I/O — and that overhead matters on real hardware too.
+
+| Chart | What to look for |
+|---|---|
+| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** — higher is better.  flow-iosched reads are within striking distance of kyber and mq-deadline.  Writes are slower, which is expected: async writes traverse more scheduling logic (budget containment, shared lane deadlines, batch limits).  BFQ's per-process accounting places it firmly at the bottom on this zero-latency device — a reminder that scheduling always costs something. |
+| ![Latency](benchmark-runs/null_blk/charts/latency.png) | **Read latency** — lower is better.  The log scale hides nothing: flow-iosched's read latency is competitive with kyber and mq-deadline.  Write-only workloads naturally have no read latency bars. |
+| ![Per-workload IOPS](benchmark-runs/null_blk/charts/per_workload.png) | **Per-workload breakdown** — every workload sorted best-to-worst for that specific workload.  flow-iosched sits in the middle on reads, and lower on writes — this is the honest picture of where the scheduler is today. |
+| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Averages across all workloads** — one glance at the spread.  flow-iosched lands mid-pack on average IOPS and read latency, but write latency is higher.  This is the area with the most room for improvement. |
+
+> [!NOTE]
+> **Why are writes slower?**  flow-iosched treats writes as background
+> (Shared lane) by default.  They compete for budget against the process's
+> I/O allowance, and they're dispatched only after higher-priority (read)
+> lanes are served.  On null_blk where actual I/O takes zero time, this
+> scheduling overhead is the dominant factor.  On real hardware it largely
+> disappears behind device latency — see the physical device charts below.
+
+#### Physical device (Intel NVMe, `/dev/nvme0n1p1`)
+
+The same benchmarks run on a real NVMe partition (Intel SSD on the secondary
+NVMe slot).  These numbers reflect actual device I/O, including NVMe
+controller latency and PCIe transfer overhead.
+
+| Chart | What to look for |
+|---|---|
+| ![IOPS](benchmark-runs/physical_device/charts/iops.png) | **Total IOPS** — notice how tight the bars are.  When the device is the bottleneck, all schedulers converge.  flow-iosched is within ~1% of every other scheduler across every workload.  On mixed 70/30 and sequential write, flow-iosched actually leads.  This is the headline: **flow-iosched matches the established schedulers on real hardware.** |
+| ![Latency](benchmark-runs/physical_device/charts/latency.png) | **Read latency** — the NVMe controller's own latency (2–4 ms on this drive) swamps any scheduler-induced latency differences.  All schedulers are effectively tied. |
+| ![Per-workload IOPS](benchmark-runs/physical_device/charts/per_workload.png) | **Per-workload breakdown** — the bars are virtually the same height for every scheduler.  The physical device is the performance ceiling. |
+| ![Consolidated averages](benchmark-runs/physical_device/charts/comparison.png) | **Averages across all workloads** — the spread that was visible on null_blk has collapsed.  Read latency, write latency, and IOPS are all within a narrow band.  This is the most important chart in this section: it shows that **flow-iosched's lane-based scheduling does not cost you throughput on real storage.** |
+
+> [!NOTE]
+> The test kernel in these runs is `7.0.5-flow` with flow-iosched built in
+> (`CONFIG_MQ_IOSCHED_FLOW=y`), booted on the CachyOS host system.  The
+> `null_blk` charts were measured first, then the physical device — both
+> on the same boot session to minimise variation.
+
+#### What this means for you
+
+If you're considering flow-iosched for your desktop or workstation, here is
+the honest takeaway:
+
+1. **On real NVMe hardware, you will not notice a throughput difference.**
+   flow-iosched, kyber, mq-deadline, and even "none" all deliver the same
+   IOPS once the drive is the bottleneck.  The scheduler's job is not to
+   go faster — the drive is already at its limit — it's to decide which
+   I/O gets priority when there's contention.
+
+2. **flow-iosched prioritises reads over writes.**  That is by design: the
+   lane system puts synchronous reads (Reserved lane) ahead of async writes
+   (Shared lane).  On a busy system where a background write flood would
+   otherwise stall interactive reads, this differentiation provides
+   value — at the cost of write throughput under synthetic write-only
+   benchmarks.
+
+3. **The autotuner adapts to your workload.**  The 3-mode system
+   (Balanced / Latency / Throughput) adjusts batch sizes and starvation
+   thresholds based on observed dispatch ratios.  You don't need to tune
+   sysfs parameters for typical desktop use.
+
+4. **Write performance on null_blk looks worse than it is in practice.**
+   null_blk has zero I/O latency, so scheduler overhead is the only
+   factor.  On a real drive where I/O takes milliseconds, that overhead
+   disappears.  The physical device charts confirm this.
+
+5. **BFQ is not a fair comparison on null_blk.**  BFQ's per-process
+   scheduling is inherently more expensive, and null_blk exposes that
+   cost dramatically.  On real hardware the gap narrows, but BFQ remains
+   the heaviest scheduler.  flow-iosched is designed to be lighter than
+   BFQ while providing more differentiation than mq-deadline.
 
 ### Scripts
 
@@ -438,11 +509,11 @@ the positional argument is preferred — some sudo configurations strip
 environment variables.
 
 > [!NOTE]
-> Scheduler ranking (flow vs mq-deadline vs bfq) tends to be consistent
-> between null_blk and physical hardware.  If flow is 15% faster on
-> null_blk, it will generally be faster on real NVMe too.  The absolute
-> numbers differ — null_blk shows scheduler overhead only, real I/O
-> includes device latency — but the ratios are usefully predictive.
+> Scheduler ranking on null_blk does not always predict real-hardware
+> ranking.  null_blk shows scheduler overhead in isolation: a scheduler
+> that is slower on null_blk does more work per I/O.  On a real device
+> where I/O latency dominates, that overhead often disappears.  The
+> physical device charts tell the honest story.
 
 ```bash
 # Default: null_blk virtual device, 30s per test (scheduler comparison)
