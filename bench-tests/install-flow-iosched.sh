@@ -270,8 +270,19 @@ install_udev() {
 
     cat > "$udev_file" << 'UDEVEOF'
 # flow-iosched: set as the default I/O scheduler for block devices.
-# Matches NVMe, SCSI/SATA, virtio, and MMC block devices.
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme[0-9]*|sd[a-z]*|vd[a-z]*|mmcblk[0-9]*", \
+#
+# Matches whole NVMe namespaces, SCSI/SATA disks, virtio disks, and
+# MMC cards — but NOT partitions (e.g. nvme0n1p1, sda1) because those
+# inherit the scheduler from their parent and have no queue/ directory.
+#
+# The kernel name patterns naturally exclude partitions:
+#   nvme0n1 matches  nvme[0-9]*n[0-9]*   (whole namespace)
+#   nvme0n1p1 doesn't match               (p1 left unconsumed by glob)
+#   sda matches      sd[a-z]              (whole disk)
+#   sda1 doesn't match                     (digits left unconsumed)
+#
+ACTION=="add|change", SUBSYSTEM=="block", \
+    KERNEL=="nvme[0-9]*n[0-9]*|sd[a-z]|sd[a-z][a-z]|vd[a-z]*|mmcblk[0-9]*", \
     ATTR{queue/scheduler}="flow-iosched"
 UDEVEOF
 
@@ -316,7 +327,7 @@ print_success() {
     echo ""
     echo "  To see sysfs tunables:"
     echo "    ls /sys/block/<device>/queue/iosched/"
-    echo""
+    echo ""
 }
 
 # ── Uninstall ─────────────────────────────────────────────────────────────────
@@ -379,13 +390,13 @@ case "${1:-}" in
         usage
         ;;
     *)
-        check_root
-        detect_toolchain
-        find_kernel_source
-        build_module
-        install_module
-        install_udev
-        load_module_now
-        print_success
+    check_root
+    detect_toolchain
+    find_kernel_source
+    build_module
+    install_module
+    load_module_now
+    install_udev
+    print_success
         ;;
 esac
