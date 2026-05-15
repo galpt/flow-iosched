@@ -35,14 +35,18 @@
 #include <linux/timekeeping.h>
 #include <linux/timer.h>
 #include <linux/atomic.h>
+#include <linux/version.h>
 
 /*
- * Kernel 7.0.x renamed del_timer_sync to timer_delete_sync.
- * Provide a compat define: on 7.x, del_timer_sync doesn't exist,
- * so define it as timer_delete_sync.  On 6.x, del_timer_sync
- * exists natively and this #ifndef is a no-op.
+ * Kernel 6.15 renamed del_timer_sync() to timer_delete_sync().
+ * Kernels >= 6.15 only have timer_delete_sync; older kernels (6.12-6.14)
+ * only have del_timer_sync.  We use del_timer_sync in the source and
+ * provide a compat define for newer kernels.
+ *
+ * The 0002 compat patch (6.12-6.17) adds extra handling for the
+ * older init_sched API; the timer API boundary at 6.15 is orthogonal.
  */
-#ifndef del_timer_sync
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 #define del_timer_sync timer_delete_sync
 #endif
 
