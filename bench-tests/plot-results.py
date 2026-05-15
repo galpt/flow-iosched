@@ -109,9 +109,9 @@ def add_measurement_label(fig):
         fig.text(0.5, 0.01, MEASUREMENT_LABEL, ha="center",
                  fontsize=7, style="italic", color="gray")
 
-def add_sorting_note(fig, note, y=0.92):
-    """Add a gray italic sorting note below the main title."""
-    fig.text(0.5, y, note, ha="center", fontsize=7, style="italic", color="gray")
+def add_sorting_note(fig, note):
+    """Add a gray italic sorting note just below the suptitle."""
+    fig.text(0.5, 0.955, note, ha="center", va="top", fontsize=7, style="italic", color="gray")
 
 def annotate_bars(ax, bars, values, pad_ratio=0.02):
     """Annotate each bar with its value, offset slightly to the right."""
@@ -151,14 +151,14 @@ for i, sched in enumerate(sched_order_iops):
     annotate_bars(ax, bars, vals)
 
 ax.set_ylabel("Total IOPS")
-ax.set_title("I/O Scheduler Comparison — Total IOPS")
+fig.suptitle("I/O Scheduler Comparison — Total IOPS", fontsize=12, fontweight="bold")
 add_sorting_note(fig, "Sorted best to worst by average total IOPS (higher is better)")
 ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
 ax.set_xticklabels(wl_labels)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
 ax.margins(x=0.15)
-fig.subplots_adjust(bottom=0.16, right=0.92)
+fig.subplots_adjust(top=0.94, bottom=0.16, right=0.92)
 add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/iops.png", dpi=150)
 plt.close(fig)
@@ -190,7 +190,7 @@ for i, sched in enumerate(sched_order_lat):
     # annotate_bars(ax, bars, vals)
 
 ax.set_ylabel("Read latency (µs)")
-ax.set_title("I/O Scheduler Comparison — Read Latency")
+fig.suptitle("I/O Scheduler Comparison — Read Latency", fontsize=12, fontweight="bold")
 add_sorting_note(fig, "Sorted best to worst by average read latency (lower is better)")
 ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
 ax.set_xticklabels(wl_labels)
@@ -208,7 +208,7 @@ ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers),
 ax.grid(axis="y", alpha=0.3)
 ax.set_yscale("log")
 ax.margins(x=0.15)
-fig.subplots_adjust(bottom=0.16, right=0.92)
+fig.subplots_adjust(top=0.94, bottom=0.16, right=0.92)
 add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/latency.png", dpi=150)
 plt.close(fig)
@@ -235,9 +235,9 @@ for wi, wl in enumerate(workloads):
     for bar, val in zip(bars, iops):
         ax.text(bar.get_width() * 1.01, bar.get_y() + bar.get_height() / 2,
                 fmt_val(val), va="center", fontsize=7)
-fig.suptitle("Per-Workload IOPS", fontsize=12)
-add_sorting_note(fig, "Sorted best to worst per workload (higher is better)", y=0.90)
-fig.tight_layout(rect=[0, 0.03, 1, 1])
+fig.suptitle("Per-Workload IOPS", fontsize=12, fontweight="bold")
+add_sorting_note(fig, "Sorted best to worst per workload (higher is better)")
+fig.tight_layout(rect=(0, 0, 1, 0.94))
 add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/per_workload.png", dpi=150)
 plt.close(fig)
@@ -300,8 +300,8 @@ for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
 
 fig.suptitle("I/O Scheduler Comparison — Consolidated Averages",
              fontsize=12, fontweight="bold")
-add_sorting_note(fig, "Sorted best to worst per metric", y=0.93)
-fig.tight_layout(rect=[0, 0.03, 1, 1])
+add_sorting_note(fig, "Sorted best to worst per metric")
+fig.tight_layout(rect=(0, 0, 1, 0.94))
 add_measurement_label(fig)
 fig.savefig(f"{CHARTS}/comparison.png", dpi=150)
 plt.close(fig)
