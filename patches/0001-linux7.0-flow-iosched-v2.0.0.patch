@@ -14,19 +14,19 @@ mechanism, per-hctx metrics, and a 3-mode autotuner.
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/Kconfig.iosched |   31 +
- block/Makefile        |    1 +
+ block/Kconfig.iosched | 28 ++++++++++++++++++++++++++++
+ block/Makefile        |  1 +
  block/flow-iosched.c  | 1767 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 1799 insertions(+)
+ 3 files changed, 1796 insertions(+)
 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
-index 27f1132..4d227d8 100644
+index 27f1132..81d927c 100644
 --- a/block/Kconfig.iosched
 +++ b/block/Kconfig.iosched
-@@ -44,4 +44,35 @@ config BFQ_CGROUP_DEBUG
- 	Enable some debugging help. Currently it exports additional stat
+@@ -45,3 +45,30 @@ config BFQ_CGROUP_DEBUG
  	files in a cgroup which can be useful for debugging.
  
+ endmenu
 +
 +config MQ_IOSCHED_FLOW
 +	tristate "Multi-Lane I/O scheduler (FLOW)"
@@ -54,7 +54,6 @@ index 27f1132..4d227d8 100644
 +	  Enable the FLOW I/O scheduler as the default blk-mq I/O scheduler.
 +	  The elevator core will automatically select "flow-iosched" for
 +	  multi-queue block devices during boot.
- endmenu
 diff --git a/block/Makefile b/block/Makefile
 index c65f4da..bc27a56 100644
 --- a/block/Makefile
