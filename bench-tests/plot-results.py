@@ -229,6 +229,7 @@ for wi, wl in enumerate(workloads):
     bars = ax.barh(range(len(scheds)), iops, color=[color_for(s) for s in scheds])
     ax.set_yticks(range(len(scheds)))
     ax.set_yticklabels(scheds, fontsize=7)
+    ax.invert_yaxis()
     ax.set_xlabel("IOPS")
     ax.set_title(wl_labels[wi].replace("\n", " "), fontsize=9)
     ax.grid(axis="x", alpha=0.3)
@@ -286,6 +287,7 @@ for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
                    color=[color_for(s) for s in sorted_scheds])
     ax.set_yticks(range(len(sorted_scheds)))
     ax.set_yticklabels(sorted_scheds, fontsize=8)
+    ax.invert_yaxis()
     dir_label = "higher is better" if direction == "higher" else "lower is better"
     ax.set_title(f"{title}\n({dir_label})", fontsize=10)
     max_val = max(sorted_vals) if sorted_vals else 1
