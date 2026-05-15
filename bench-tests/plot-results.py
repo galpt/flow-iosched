@@ -110,8 +110,8 @@ def add_measurement_label(fig):
                  fontsize=7, style="italic", color="gray")
 
 def add_sorting_note(fig, note):
-    """Add a gray italic sorting note just below the suptitle."""
-    fig.text(0.5, 0.955, note, ha="center", va="top", fontsize=7, style="italic", color="gray")
+    """Add a gray italic sorting note below the suptitle."""
+    fig.text(0.5, 0.93, note, ha="center", va="top", fontsize=7, style="italic", color="gray")
 
 def annotate_bars(ax, bars, values, pad_ratio=0.02):
     """Annotate each bar with its value, offset slightly to the right."""
