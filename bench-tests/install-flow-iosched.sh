@@ -69,10 +69,18 @@ cmd_status() {
     fi
 
     # Module loaded?
-    if lsmod | grep -q "^${MODULE_NAME//-/_}"; then
+    local modname="${MODULE_NAME//-/_}"
+    if lsmod | grep -q "^$modname"; then
         ok "Module loaded in kernel"
     else
         err "Module not loaded"
+        # Check if it failed due to signing or missing dependency
+        local dmesg_hint
+        dmesg_hint=$(dmesg 2>/dev/null | grep -i "$modname\|$MODULE_NAME" | tail -5)
+        if [ -n "$dmesg_hint" ]; then
+            echo "  Recent dmesg entries:"
+            echo "$dmesg_hint" | sed 's/^/    /'
+        fi
     fi
 
     # udev rule present?
@@ -307,11 +315,20 @@ load_module_now() {
         modprobe -r "$MODULE_NAME" 2>/dev/null || true
     fi
 
-    modprobe "$MODULE_NAME" 2>/dev/null || {
-        insmod "/lib/modules/$(uname -r)/extra/$MODULE_FILE" 2>/dev/null || {
-            die "Failed to load $MODULE_NAME. Check dmesg."
+    echo "  Module file: /lib/modules/$(uname -r)/extra/$MODULE_FILE"
+    local output
+    output=$(modprobe "$MODULE_NAME" 2>&1) || {
+        output=$(insmod "/lib/modules/$(uname -r)/extra/$MODULE_FILE" 2>&1) || {
+            echo "  modprobe/insmod output: $output"
+            die "Failed to load $MODULE_NAME. Check dmesg with: sudo dmesg | tail -20"
         }
     }
+
+    # Verify the module is actually loaded (modprobe can report success but
+    # the module may fail init and be immediately unloaded).
+    if ! lsmod | grep -q "^${MODULE_NAME//-/_}"; then
+        die "Module was loaded but immediately unloaded. Check dmesg."
+    fi
 
     ok "$MODULE_NAME loaded in kernel"
 }
