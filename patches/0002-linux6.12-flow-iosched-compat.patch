@@ -1,52 +1,39 @@
 From 5ac97817a713469e3644821cab8ae5553e54589e Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
 Date: Thu, 14 May 2026 20:18:06 +0700
-Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17
+Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v2.0.0)
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/flow-iosched.c | 27 +++++++++++++++++++++------
- 1 file changed, 21 insertions(+), 6 deletions(-)
+ block/flow-iosched.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
 
-diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index 855fa7a..49e1cd1 100644
---- a/block/flow-iosched.c
-+++ b/block/flow-iosched.c
-@@ -842,18 +842,28 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
+@@ -1324,16 +1324,22 @@
  
- /* ── Init / Exit ──────────────────────────────────────────────────── */
- 
--/* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
-- * For kernels 6.12-6.17 (which pass elevator_type), apply
+ /* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
+  * For kernels 6.12-6.17 (which pass elevator_type), apply
 - * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
 -static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
-+/*
-+ * 6.12-6.17 compat init_sched signature: passes elevator_type *.
-+ * The function allocates the elevator_queue internally via elevator_alloc()
-+ * and sets q->elevator, which the caller on 6.18+ does instead.
-+ */
++ * patches/0002-linux6.12-flow-iosched-compat.patch for kernel 6.12-6.17.     */
 +static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
  {
  	struct flow_data *fd;
-+	struct elevator_queue *eq;
  	int ret = -ENOMEM;
++	struct elevator_queue *eq;
  
+ 	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
+ 	if (!fd) {
+ 		pr_err("flow-iosched: failed to allocate flow_data\n");
+ 		return ret;
++
 +	eq = elevator_alloc(q, e);
 +	if (!eq) {
 +		pr_err("flow-iosched: failed to allocate elevator\n");
 +		return -ENOMEM;
-+	}
-+
- 	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
- 	if (!fd) {
- 		pr_err("flow-iosched: failed to allocate flow_data\n");
--		return ret;
-+		ret = -ENOMEM;
-+		goto out_put_eq;
  	}
  
  	/* Create memory pools */
-@@ -862,7 +872,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+@@ -1342,7 +1348,7 @@
  					      0, SLAB_HWCACHE_ALIGN, NULL);
  	if (!fd->rq_data_cache) {
  		pr_err("flow-iosched: failed to create rq_data cache\n");
@@ -55,16 +42,7 @@ index 855fa7a..49e1cd1 100644
  	}
  
  	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-@@ -926,12 +936,17 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
- 	fd->queue = q;
- 	blk_stat_enable_accounting(q);
- 
-+	/* 6.12 compat: caller does not set q->elevator; we must */
-+	q->elevator = eq;
-+
- 	return 0;
- 
- destroy_rq_pool:
+@@ -1427,9 +1433,12 @@
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
@@ -73,6 +51,7 @@ index 855fa7a..49e1cd1 100644
  free_fd:
  	kfree(fd);
  	return ret;
--- 
-2.54.0
-
++
+ }
+ 
+ static void flow_exit_sched(struct elevator_queue *e)
