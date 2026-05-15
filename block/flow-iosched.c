@@ -969,6 +969,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 	spin_lock_init(&fd->lock);
 
 	eq->elevator_data = fd;
+	q->elevator = eq;
 
 	/* Multi-queue dispatch — each hctx dispatches independently */
 	blk_queue_flag_clear(QUEUE_FLAG_SQ_SCHED, q);
