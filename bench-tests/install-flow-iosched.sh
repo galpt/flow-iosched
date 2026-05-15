@@ -111,7 +111,14 @@ cmd_status() {
 # ── Find kernel source for private block headers ──────────────────────────────
 find_kernel_source() {
     local kv
-    kv="$(uname -r | sed 's/-[^-]*$//')"   # e.g. 7.0.8 → 7.0.8 (strip cachyos suffix)
+    # Strip everything after the first non-version suffix.
+    # e.g. 7.0.8-1-cachyos → 7.0.8,  6.18.5-arch1 → 6.18.5
+    kv="$(uname -r | sed 's/^\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/')"
+
+    # Fallback: if sed didn't match, use the running kernel version directly
+    if [ "$kv" = "$(uname -r)" ]; then
+        kv="$(uname -r | sed 's/-.*//')"   # cruder fallback
+    fi
 
     # 1. Check if the build tree has the headers we need
     if [ -f "/lib/modules/$(uname -r)/build/block/blk-mq.h" ]; then
