@@ -93,12 +93,13 @@ cmd_status() {
         fi
     fi
 
-    # udev rule present?
-    local udev_rule="/etc/udev/rules.d/90-flow-iosched.rules"
-    if [ -f "$udev_rule" ]; then
-        ok "udev rule present ($udev_rule)"
+    # Systemd service and modules-load config present?
+    local modules_load_conf="/etc/modules-load.d/flow-iosched.conf"
+    local sched_svc="/etc/systemd/system/flow-iosched-scheduler@.service"
+    if [ -f "$modules_load_conf" ] && [ -f "$sched_svc" ]; then
+        ok "Boot persistence: modules-load.d + systemd service"
         # Check which scheduler active on common block devices
-        for dev in /sys/block/nvme[0-9]* /sys/block/sd[a-z] /sys/block/vd[a-z] /sys/block/mmcblk[0-9]*; do
+        for dev in /sys/block/nvme[0-9]*n[0-9]* /sys/block/sd[a-z] /sys/block/sd[a-z][a-z] /sys/block/vd[a-z]* /sys/block/mmcblk[0-9]*; do
             [ -f "$dev/queue/scheduler" ] || continue
             local current
             current=$(cat "$dev/queue/scheduler" 2>/dev/null | grep -o '\[.*\]' | tr -d '[]')
@@ -107,7 +108,7 @@ cmd_status() {
             echo "  $devname: $current"
         done
     else
-        err "udev rule not present — flow-iosched will not be the default after reboot"
+        err "Boot persistence not configured — run 'sudo $0' to set it up"
     fi
 
     # Kernel module params (sysfs) — only if flow-iosched is the active scheduler
@@ -289,33 +290,96 @@ install_module() {
     ok "Module installed to $mod_dir/"
 }
 
-# ── Create udev rule to make flow-iosched the default scheduler ──────────────
-install_udev() {
-    local udev_file="/etc/udev/rules.d/90-flow-iosched.rules"
+# ── Create modules-load config to load module at boot ────────────────────────
+install_modules_load() {
+    local conf_file="/etc/modules-load.d/flow-iosched.conf"
+    echo "# Load flow-iosched at boot" > "$conf_file"
+    echo "flow-iosched" >> "$conf_file"
+    ok "modules-load.d config installed: $conf_file"
 
-    cat > "$udev_file" << 'UDEVEOF'
-# flow-iosched: set as the default I/O scheduler for block devices.
-#
-# Matches whole NVMe namespaces, SCSI/SATA disks, virtio disks, and
-# MMC cards — but NOT partitions (e.g. nvme0n1p1, sda1) because those
-# inherit the scheduler from their parent and have no queue/ directory.
-#
-# The kernel name patterns naturally exclude partitions:
-#   nvme0n1 matches  nvme[0-9]*n[0-9]*   (whole namespace)
-#   nvme0n1p1 doesn't match               (p1 left unconsumed by glob)
-#   sda matches      sd[a-z]              (whole disk)
-#   sda1 doesn't match                     (digits left unconsumed)
-#
-ACTION=="add|change", SUBSYSTEM=="block", \
-    KERNEL=="nvme[0-9]*n[0-9]*|sd[a-z]|sd[a-z][a-z]|vd[a-z]*|mmcblk[0-9]*", \
-    ATTR{queue/scheduler}="flow-iosched"
-UDEVEOF
+    # Load the module now so a reboot is not required
+    # (load_module_now is called separately; this just ensures the file exists)
+    systemctl restart systemd-modules-load 2>/dev/null || true
+}
 
-    # Reload udev and trigger for existing devices
-    udevadm control --reload-rules 2>/dev/null || true
-    udevadm trigger --type=devices --action=change -S block 2>/dev/null || true
+# ── Create systemd oneshot service to set the scheduler on each device ──────
+install_systemd_service() {
+    local service_file="/etc/systemd/system/flow-iosched-scheduler@.service"
 
-    ok "udev rule installed: $udev_file"
+    cat > "$service_file" << 'SVCEOF'
+[Unit]
+Description=Set flow-iosched I/O scheduler for %I
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo flow-iosched > /sys/block/%I/queue/scheduler'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target
+SVCEOF
+
+    # Enable for each eligible block device currently present
+    local enabled=0
+    for dev in /sys/block/nvme[0-9]*n[0-9]* /sys/block/sd[a-z] /sys/block/sd[a-z][a-z] /sys/block/vd[a-z]* /sys/block/mmcblk[0-9]*; do
+        [ -f "$dev/queue/scheduler" ] || continue
+        local dev_name
+        dev_name="$(basename "$dev")"
+        if grep -q "flow-iosched" "$dev/queue/scheduler" 2>/dev/null; then
+            systemctl enable "flow-iosched-scheduler@${dev_name}.service" 2>/dev/null || true
+            systemctl start "flow-iosched-scheduler@${dev_name}.service" 2>/dev/null || true
+            enabled=$((enabled + 1))
+        fi
+    done
+    if [ "$enabled" -gt 0 ]; then
+        ok "Systemd scheduler service enabled for $enabled block device(s)"
+    fi
+
+    # Migrate: remove the old udev rule if it exists
+    local old_udev="/etc/udev/rules.d/90-flow-iosched.rules"
+    if [ -f "$old_udev" ]; then
+        rm -f "$old_udev"
+        udevadm control --reload-rules 2>/dev/null || true
+        warn "Removed old udev rule (replaced by systemd service)"
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+}
+
+# ── Remove systemd service and modules-load config ───────────────────────────
+remove_systemd_install() {
+    # Remove and disable service instances
+    local count=0
+    for unit in /etc/systemd/system/flow-iosched-scheduler@*.service; do
+        [ -f "$unit" ] || continue
+        local link
+        link=$(basename "$unit")
+        # Extract device name from the instance part of the template
+        local dev="${link#*@}"
+        dev="${dev%.service}"
+        systemctl disable "flow-iosched-scheduler@${dev}.service" 2>/dev/null || true
+        count=$((count + 1))
+    done
+    if [ "$count" -gt 0 ]; then
+        ok "Disabled $count systemd service instance(s)"
+    fi
+
+    # Remove the template
+    rm -f /etc/systemd/system/flow-iosched-scheduler@.service
+    systemctl daemon-reload 2>/dev/null || true
+
+    # Remove modules-load config
+    rm -f /etc/modules-load.d/flow-iosched.conf
+    ok "Removed modules-load.d config"
+
+    # Also clean up old udev rule (from previous versions)
+    if [ -f /etc/udev/rules.d/90-flow-iosched.rules ]; then
+        rm -f /etc/udev/rules.d/90-flow-iosched.rules
+        udevadm control --reload-rules 2>/dev/null || true
+        ok "Removed old udev rule"
+    fi
 }
 
 # ── Load the module now ───────────────────────────────────────────────────────
@@ -379,8 +443,10 @@ print_success() {
     echo -e "  ${GREEN}flow-iosched is installed and enabled.${NC}"
     echo "────────────────────────────────────────────────────────────────"
     echo ""
-    echo "  It is now the active scheduler on eligible block devices."
-    echo "  This will persist across reboots via the installed udev rule."
+    echo "  The module will load automatically at boot (modules-load.d)."
+    echo "  A systemd oneshot service sets flow-iosched as the active"
+    echo "  scheduler on each eligible block device after boot."
+    echo "  The scheduler is already active on your devices now."
     echo ""
     echo "  To check the current scheduler on each device:"
     echo "    sudo ./$(basename "$0") --status"
@@ -397,15 +463,8 @@ print_success() {
 cmd_remove() {
     info "Removing flow-iosched ..."
 
-    # 1. Remove udev rule
-    local udev_file="/etc/udev/rules.d/90-flow-iosched.rules"
-    if [ -f "$udev_file" ]; then
-        rm -f "$udev_file"
-        udevadm control --reload-rules 2>/dev/null || true
-        # Trigger to restore the previous default scheduler
-        udevadm trigger --type=devices --action=change -S block 2>/dev/null || true
-        ok "Removed udev rule"
-    fi
+    # 1. Remove systemd services and modules-load config
+    remove_systemd_install
 
     # 2. Unload the module if loaded
     local modname="${MODULE_NAME//-/_}"
@@ -413,7 +472,6 @@ cmd_remove() {
         # Switch all block devices back to the kernel default before unloading
         for dev in /sys/block/*/queue/scheduler; do
             if grep -q "flow-iosched" "$dev" 2>/dev/null; then
-                # Pick the first available non-flow scheduler
                 local alt
                 alt=$(cat "$dev" | tr ' ' '\n' | grep -v 'flow\|\[\|\]' | head -1)
                 [ -n "$alt" ] && echo "$alt" > "$dev" 2>/dev/null || true
@@ -459,7 +517,8 @@ case "${1:-}" in
     build_module
     install_module
     load_module_now
-    install_udev
+    install_modules_load
+    install_systemd_service
     print_success
         ;;
 esac
