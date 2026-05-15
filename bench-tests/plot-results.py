@@ -180,7 +180,9 @@ for i, sched in enumerate(sched_order_lat):
         else:
             vals.append(0)
     bars = ax.bar(x + i * width, vals, width, label=sched, color=color_for(sched))
-    annotate_bars(ax, bars, vals)
+    # Latency values span ~25x range (BFQ outlier); skip annotations to
+    # avoid overlapping text.  The log scale makes all bars readable.
+    # annotate_bars(ax, bars, vals)
 
 ax.set_ylabel("Read latency (µs)")
 ax.set_title("I/O Scheduler Comparison — Read Latency (lower is better)")
@@ -239,7 +241,7 @@ metrics = [
      lambda m: m["write_lat_us"],
      lambda m: m["write_iops"] > 0),  # only workloads with writes
 ]
-fig, axes = plt.subplots(1, len(metrics), figsize=(14, 5))
+fig, axes = plt.subplots(1, len(metrics), figsize=(14, 5), sharey=True)
 if len(metrics) == 1:
     axes = [axes]
 
@@ -268,11 +270,15 @@ for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
     ax.set_yticklabels(sorted_scheds, fontsize=8)
     dir_label = "higher is better" if direction == "higher" else "lower is better"
     ax.set_title(f"{title}\n({dir_label})", fontsize=10)
-    # Ensure bars always visible: start from 0, with minimum right margin
     max_val = max(sorted_vals) if sorted_vals else 1
     ax.set_xlim(left=0, right=max_val * 1.2 or 1)
     ax.grid(axis="x", alpha=0.3)
-    annotate_bars(ax, bars, sorted_vals, pad_ratio=0.01)
+    # Annotate bars with per-bar relative padding (matches per_workload style)
+    for bar, val in zip(bars, sorted_vals):
+        if val == 0:
+            continue
+        ax.text(bar.get_width() * 1.01, bar.get_y() + bar.get_height() / 2,
+                fmt_val(val), va="center", fontsize=6)
 
 fig.suptitle("I/O Scheduler Comparison — Consolidated Averages\nSorted best to worst per metric",
              fontsize=12, fontweight="bold")
