@@ -220,16 +220,16 @@ struct flow_hctx_data {
 	/* Back-pointer */
 	struct blk_mq_hw_ctx	*hctx;
 
-	/* Per-hctx metrics (no global atomics — aggregated by autotune timer) */
-	u64			m_reserved_dispatch;
-	u64			m_latency_dispatch;
-	u64			m_shared_dispatch;
-	u64			m_contained_dispatch;
-	u64			m_contained_rescue;
-	u64			m_shared_rescue;
-	u64			m_budget_exhaustions;
-	u64			m_latency_debt_raises;
-	u64			m_hog_containments;
+	/* Per-hctx metrics (atomic64_t — written under fd->lock, read under khd->lock) */
+	atomic64_t		m_reserved_dispatch;
+	atomic64_t		m_latency_dispatch;
+	atomic64_t		m_shared_dispatch;
+	atomic64_t		m_contained_dispatch;
+	atomic64_t		m_contained_rescue;
+	atomic64_t		m_shared_rescue;
+	atomic64_t		m_budget_exhaustions;
+	atomic64_t		m_latency_debt_raises;
+	atomic64_t		m_hog_containments;
 };
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
@@ -480,8 +480,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 					  FLOW_HOG_SCORE_MAX);
 		/* Track exhaustion for autotune metrics */
 		struct flow_hctx_data *khd = hctx->sched_data;
-		if (khd && khd->m_budget_exhaustions < U64_MAX)
-			khd->m_budget_exhaustions++;
+		if (khd)
+			atomic64_inc(&khd->m_budget_exhaustions);
 	}
 
 	/* Return true if request should be contained */
@@ -940,26 +940,22 @@ dispatch_rd:
 		/* Update per-hctx metrics counters */
 		switch (lane) {
 		case FLOW_LANE_RESERVED:
-			khd->m_reserved_dispatch++;
+			atomic64_inc(&khd->m_reserved_dispatch);
 			break;
 		case FLOW_LANE_LATENCY:
-			khd->m_latency_dispatch++;
+			atomic64_inc(&khd->m_latency_dispatch);
 			break;
 		case FLOW_LANE_SHARED:
-			khd->m_shared_dispatch++;
-			/* Count as rescue if higher-priority lanes have pending work */
+			atomic64_inc(&khd->m_shared_dispatch);
 			if (flow_first_rq_for_lane(fd, FLOW_LANE_RESERVED) ||
 			    flow_first_rq_for_lane(fd, FLOW_LANE_LATENCY))
-				khd->m_shared_rescue++;
+				atomic64_inc(&khd->m_shared_rescue);
 			break;
 		case FLOW_LANE_CONTAINED:
-			khd->m_contained_dispatch++;
-			/* Detect rescue dispatch: count as rescue if higher-priority
-			 * lanes have pending work (starvation or quota override).
-			 */
+			atomic64_inc(&khd->m_contained_dispatch);
 			if (flow_first_rq_for_lane(fd, FLOW_LANE_RESERVED) ||
 			    flow_first_rq_for_lane(fd, FLOW_LANE_LATENCY))
-				khd->m_contained_rescue++;
+				atomic64_inc(&khd->m_contained_rescue);
 			break;
 		}
 
@@ -1246,28 +1242,25 @@ static void flow_autotune_timer_fn(struct timer_list *t)
 			continue;
 		guard(spinlock_irqsave)(&khd->lock);
 		/*
-		 * Metrics counters are incremented under fd->lock (in the
-		 * dispatch path) and read/reset here under khd->lock. The
-		 * dual-lock access creates a benign data race: on x86_64,
-		 * aligned u64 loads/stores are single-copy-atomic, and the
-		 * worst outcome is a one-tick stale count.  Annotate with
-		 * data_race() to suppress KCSAN.
+		 * Metrics counters are atomic64_t — race-free between
+		 * dispatch (atomic64_inc under fd->lock) and the aggregation
+		 * here (atomic64_read/atomic64_set under khd->lock).
 		 */
-		total_reserved	+= data_race(khd->m_reserved_dispatch);
-		total_latency	+= data_race(khd->m_latency_dispatch);
-		total_shared	+= data_race(khd->m_shared_dispatch);
-		total_contained	+= data_race(khd->m_contained_dispatch);
-		total_rescue	+= data_race(khd->m_contained_rescue) +
-				   data_race(khd->m_shared_rescue);
-		data_race(khd->m_reserved_dispatch = 0);
-		data_race(khd->m_latency_dispatch = 0);
-		data_race(khd->m_shared_dispatch = 0);
-		data_race(khd->m_contained_dispatch = 0);
-		data_race(khd->m_contained_rescue = 0);
-		data_race(khd->m_shared_rescue = 0);
-		data_race(khd->m_budget_exhaustions = 0);
-		data_race(khd->m_latency_debt_raises = 0);
-		data_race(khd->m_hog_containments = 0);
+		total_reserved	+= atomic64_read(&khd->m_reserved_dispatch);
+		total_latency	+= atomic64_read(&khd->m_latency_dispatch);
+		total_shared	+= atomic64_read(&khd->m_shared_dispatch);
+		total_contained	+= atomic64_read(&khd->m_contained_dispatch);
+		total_rescue	+= atomic64_read(&khd->m_contained_rescue) +
+				   atomic64_read(&khd->m_shared_rescue);
+		atomic64_set(&khd->m_reserved_dispatch, 0);
+		atomic64_set(&khd->m_latency_dispatch, 0);
+		atomic64_set(&khd->m_shared_dispatch, 0);
+		atomic64_set(&khd->m_contained_dispatch, 0);
+		atomic64_set(&khd->m_contained_rescue, 0);
+		atomic64_set(&khd->m_shared_rescue, 0);
+		atomic64_set(&khd->m_budget_exhaustions, 0);
+		atomic64_set(&khd->m_latency_debt_raises, 0);
+		atomic64_set(&khd->m_hog_containments, 0);
 	}
 
 	total_dispatch = total_reserved + total_latency +
@@ -1518,7 +1511,7 @@ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 	memset(khd->starvation_rounds, 0, sizeof(khd->starvation_rounds));
 	khd->high_priority_burst_rounds = 0;
 	khd->hctx = hctx;
-	memset(&khd->m_reserved_dispatch, 0, sizeof(u64) * 9);
+	/* All atomic64_t metrics counters are already 0 from kzalloc. */
 
 	hctx->sched_data = khd;
 	return 0;
