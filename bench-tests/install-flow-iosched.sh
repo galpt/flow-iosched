@@ -170,8 +170,8 @@ find_kernel_source() {
         *)
             # Use the kv as the version to download, falling back to 7.0.8
             local ver="${kv:-7.0.8}"
-            local major_minor="${ver%.*}"   # e.g. 7.0
-            local url="https://cdn.kernel.org/pub/linux/kernel/v${major_minor}.x/linux-${ver}.tar.xz"
+            local major="${ver%%.*}"          # e.g. 7
+            local url="https://cdn.kernel.org/pub/linux/kernel/v${major}.x/linux-${ver}.tar.xz"
             local tarball="$cached/linux-${ver}.tar.xz"
             local extract_dir="$cached/linux-${ver}"
 
