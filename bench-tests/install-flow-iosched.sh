@@ -350,15 +350,13 @@ SVCEOF
 
 # ── Remove systemd service and modules-load config ───────────────────────────
 remove_systemd_install() {
-    # Remove and disable service instances
+    # List enabled service instances (skip the template file itself)
     local count=0
-    for unit in /etc/systemd/system/flow-iosched-scheduler@*.service; do
-        [ -f "$unit" ] || continue
-        local link
-        link=$(basename "$unit")
-        # Extract device name from the instance part of the template
-        local dev="${link#*@}"
-        dev="${dev%.service}"
+    for instance in /etc/systemd/system/multi-user.target.wants/flow-iosched-scheduler@*.service; do
+        [ -f "$instance" ] || continue
+        local dev
+        dev=$(basename "$instance" | sed 's/flow-iosched-scheduler@\(.*\)\.service/\1/')
+        [ -z "$dev" ] && continue
         systemctl disable "flow-iosched-scheduler@${dev}.service" 2>/dev/null || true
         count=$((count + 1))
     done
@@ -469,12 +467,16 @@ cmd_remove() {
     # 2. Unload the module if loaded
     local modname="${MODULE_NAME//-/_}"
     if lsmod | grep -q "^$modname"; then
-        # Switch all block devices back to the kernel default before unloading
-        for dev in /sys/block/*/queue/scheduler; do
-            if grep -q "flow-iosched" "$dev" 2>/dev/null; then
+        # Switch all block devices back to a non-flow scheduler before unloading.
+        for dev_path in /sys/block/*/queue/scheduler; do
+            [ -f "$dev_path" ] || continue
+            if grep -q "flow-iosched" "$dev_path" 2>/dev/null; then
+                # Pick the first non-flow, non-bracketed scheduler
                 local alt
-                alt=$(cat "$dev" | tr ' ' '\n' | grep -v 'flow\|\[\|\]' | head -1)
-                [ -n "$alt" ] && echo "$alt" > "$dev" 2>/dev/null || true
+                alt=$(cat "$dev_path" | tr ' ' '\n' | grep -v '^\[' | grep -v 'flow-iosched' | head -1)
+                if [ -n "$alt" ]; then
+                    echo "$alt" > "$dev_path" 2>/dev/null || true
+                fi
             fi
         done
         modprobe -r "$modname" 2>/dev/null || rmmod "$modname" 2>/dev/null || true
@@ -491,7 +493,7 @@ cmd_remove() {
 
     echo ""
     ok "flow-iosched has been removed."
-    echo "  Reboot or run 'sudo udevadm trigger' to restore the default scheduler on all devices."
+    echo "  A reboot is needed to restore the original scheduler on all block devices."
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
