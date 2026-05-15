@@ -1048,8 +1048,11 @@ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 	struct flow_hctx_data *khd;
 
 	khd = kzalloc_node(sizeof(*khd), GFP_KERNEL, hctx->numa_node);
-	if (!khd)
+	if (!khd) {
+		pr_err("flow-iosched: init_hctx failed for hctx %u (node %d)\n",
+		       hctx_idx, hctx->numa_node);
 		return -ENOMEM;
+	}
 
 	spin_lock_init(&khd->lock);
 	INIT_LIST_HEAD(&khd->dispatch_list);
