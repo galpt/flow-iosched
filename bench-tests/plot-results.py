@@ -246,6 +246,7 @@ if len(metrics) == 1:
     axes = [axes]
 
 for ax_i, (title, direction, extractor, qualifies) in enumerate(metrics):
+    ax = axes[ax_i]
     data_per_sched = []
     for sched in schedulers:
         vals = []
