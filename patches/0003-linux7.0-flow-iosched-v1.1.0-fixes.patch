@@ -1,5 +1,5 @@
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index dcf5f8c..da6d298 100644
+index dcf5f8c..60bc371 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
 @@ -287,7 +287,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
@@ -222,7 +222,15 @@ index dcf5f8c..da6d298 100644
  		u8 bio_lane;
  
  		/* Determine what lane the bio would land in */
-@@ -944,6 +994,43 @@ static void flow_exit_sched(struct elevator_queue *e)
+@@ -919,6 +969,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+ 	spin_lock_init(&fd->lock);
+ 
+ 	eq->elevator_data = fd;
++	q->elevator = eq;
+ 
+ 	/* Multi-queue dispatch — each hctx dispatches independently */
+ 	blk_queue_flag_clear(QUEUE_FLAG_SQ_SCHED, q);
+@@ -944,6 +995,43 @@ static void flow_exit_sched(struct elevator_queue *e)
  	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
  	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
  
@@ -266,7 +274,7 @@ index dcf5f8c..da6d298 100644
  	mempool_destroy(fd->rq_data_pool);
  	kmem_cache_destroy(fd->rq_data_cache);
  	kmem_cache_destroy(fd->dl_group_cache);
-@@ -957,12 +1044,14 @@ static void flow_exit_sched(struct elevator_queue *e)
+@@ -957,12 +1045,14 @@ static void flow_exit_sched(struct elevator_queue *e)
  
  static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
  {
@@ -283,7 +291,7 @@ index dcf5f8c..da6d298 100644
  
  	spin_lock_init(&khd->lock);
  	INIT_LIST_HEAD(&khd->dispatch_list);
-@@ -980,7 +1069,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+@@ -980,7 +1070,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
  	if (!khd)
  		return;
  
