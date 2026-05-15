@@ -40,10 +40,7 @@ if os.path.isfile(META_PATH):
                 meta[k] = v
     device_label = meta.get("label", meta.get("device", "unknown"))
     runtime = meta.get("runtime", "?")
-    if meta.get("null_blk") == "true":
-        MEASUREMENT_LABEL = f"Measured using {device_label} ({runtime}s per test)"
-    else:
-        MEASUREMENT_LABEL = f"Measured using {device_label} ({runtime}s per test)"
+    MEASUREMENT_LABEL = f"Measured using {device_label} ({runtime}s per test)"
 else:
     MEASUREMENT_LABEL = ""
 
@@ -153,7 +150,7 @@ for i, sched in enumerate(sched_order_iops):
 ax.set_ylabel("Total IOPS")
 fig.suptitle("I/O Scheduler Comparison — Total IOPS", fontsize=12, fontweight="bold")
 add_sorting_note(fig, "Sorted best to worst by average total IOPS (higher is better)")
-ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
+ax.set_xticks(x + width * len(schedulers) / 2)
 ax.set_xticklabels(wl_labels)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
@@ -192,7 +189,7 @@ for i, sched in enumerate(sched_order_lat):
 ax.set_ylabel("Read latency (µs)")
 fig.suptitle("I/O Scheduler Comparison — Read Latency", fontsize=12, fontweight="bold")
 add_sorting_note(fig, "Sorted best to worst by average read latency (lower is better)")
-ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
+ax.set_xticks(x + width * len(schedulers) / 2)
 ax.set_xticklabels(wl_labels)
 # Annotate write-only workloads (no read latency to show)
 for wi, wl in enumerate(workloads):
@@ -201,7 +198,7 @@ for wi, wl in enumerate(workloads):
         for row in rows if row["workload"] == wl
     )
     if all_zero:
-        ax.text(x[wi] + width * (len(schedulers) - 1) / 2, 0.08,
+        ax.text(x[wi] + width * len(schedulers) / 2, 0.08,
                 "write-only\n(no reads)", ha="center", va="bottom",
                 fontsize=6, color="gray", transform=ax.get_xaxis_transform())
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
@@ -215,7 +212,7 @@ plt.close(fig)
 print(f"  → {CHARTS}/latency.png")
 
 # ── 3. Per-workload IOPS (horizontal bars, sorted best first per workload) ──
-fig, axes = plt.subplots(1, len(workloads), figsize=(14, 4), sharey=True)
+fig, axes = plt.subplots(1, len(workloads), figsize=(14, 4))
 for wi, wl in enumerate(workloads):
     ax = axes[wi]
     pairs = []
@@ -259,7 +256,7 @@ metrics = [
      lambda m: m["write_lat_us"],
      lambda m: m["write_iops"] > 0),  # only workloads with writes
 ]
-fig, axes = plt.subplots(1, len(metrics), figsize=(14, 5), sharey=True)
+fig, axes = plt.subplots(1, len(metrics), figsize=(14, 5))
 if len(metrics) == 1:
     axes = [axes]
 
