@@ -287,7 +287,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 	ficq->io_budget_sectors -= (s64)block_sectors;
 
 	/* Raise containment score on exhaustion */
-	if (ficq->io_budget_sectors < 0)
+	if (ficq->io_budget_sectors < 0 &&
+	    ficq->containment_score <= U32_MAX - FLOW_SCORE_INC_AT_EXHAUST)
 		ficq->containment_score += FLOW_SCORE_INC_AT_EXHAUST;
 
 	/* Return true if request should be contained */
@@ -312,19 +313,19 @@ static struct rb_root_cached *flow_root_for_lane(struct flow_data *fd, u8 lane)
 	}
 }
 
-static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
+static bool flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 				struct request *rq)
 {
 	struct rb_root_cached *root = flow_root_for_lane(fd, lane);
 	struct rb_node **link = &root->rb_root.rb_node, *parent = NULL;
 	bool leftmost = true;
 	struct flow_rq_data *rd = get_rq_data(rq);
-	struct dl_group *dlg;
+	struct dl_group *dlg, *new_dlg;
 	u64 deadline;
 
 	lockdep_assert_held(&fd->lock);
 	if (!root || !rd)
-		return;
+		return false;
 
 	rd->lane = lane;
 	rd->deadline = flow_deadline(rq, lane);
@@ -333,6 +334,11 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 
 	/* Quantise deadline for grouping */
 	deadline = rd->deadline & ~((1ULL << FLOW_QUANTUM_SHIFT) - 1);
+
+	/* Pre-allocate a dl_group node in case the walk falls through */
+	new_dlg = kmem_cache_zalloc(fd->dl_group_cache, GFP_ATOMIC);
+	if (!new_dlg)
+		return false;
 
 	while (*link) {
 		dlg = rb_entry(*link, struct dl_group, node);
@@ -343,13 +349,13 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 			link = &(*link)->rb_right;
 			leftmost = false;
 		} else {
+			kmem_cache_free(fd->dl_group_cache, new_dlg);
 			goto found;
 		}
 	}
 
-	dlg = kmem_cache_zalloc(fd->dl_group_cache, GFP_ATOMIC);
-	if (!dlg)
-		return;
+	/* No existing node — use the pre-allocated slot */
+	dlg = new_dlg;
 	dlg->deadline = deadline;
 	dlg->lane = lane;
 	INIT_LIST_HEAD(&dlg->rqs);
@@ -357,8 +363,9 @@ static void flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 	rb_insert_color_cached(&dlg->node, root, leftmost);
 
 found:
-	rd->dl_group = dlg;	/* store back-pointer for O(1) dl_group removal */
+	rd->dl_group = dlg;
 	list_add_tail(&rd->dl_node, &dlg->rqs);
+	return true;
 }
 
 static void flow_del_from_dl_tree(struct flow_data *fd, u8 lane,
@@ -457,7 +464,17 @@ static void flow_remove_request(struct flow_data *fd, struct request *rq,
 
 /* ── Insert request ───────────────────────────────────────────────── */
 
-static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
+
+/**
+ * flow_insert_request - Insert a request into the scheduler
+ * @hctx: hardware context
+ * @rq: request to insert
+ * @insert_flags: BLK_MQ_INSERT_AT_HEAD etc.
+ * @free: list for merged-and-consumed requests to be reclaimed after locks released
+ *
+ * Return: true on success, false on allocation failure (caller must fail the request)
+ */
+static bool flow_insert_request(struct blk_mq_hw_ctx *hctx,
 				struct request *rq, blk_insert_t insert_flags,
 				struct list_head *free)
 {
@@ -472,13 +489,13 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	lockdep_assert_held(&fd->lock);
 	/* guard against NULL priv[0] when mempool_alloc fails in prepare_request */
 	if (!rd)
-		return;
+		return true;					/* nothing to schedule — block layer owns the completion */
 
 	rd->block_size = blk_rq_bytes(rq);
 
 	/* Attempt merge with existing requests in scheduler */
 	if (blk_mq_sched_try_insert_merge(q, rq, free))
-		return;
+		return true;
 
 	/* Budget / containment check */
 	if (icq) {
@@ -493,7 +510,7 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	if (contained && lane < FLOW_LANE_CONTAINED)
 		lane = FLOW_LANE_CONTAINED;
 
-	rd->lane = lane;
+	WRITE_ONCE(rd->lane, lane);
 
 	/* Tier 0: Emergency → prio_queue */
 	if (lane == FLOW_LANE_EMERGENCY) {
@@ -502,7 +519,8 @@ static void flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	}
 
 	/* Tiers 1-4: deadline-sorted rbtree */
-	flow_add_to_dl_tree(fd, lane, rq);
+	if (!flow_add_to_dl_tree(fd, lane, rq))
+		return false;					/* allocation failure — caller must fail the I/O */
 
 done_insert:
 	/* Make mergeable requests visible to bio merge */
@@ -512,6 +530,7 @@ done_insert:
 		if (!q->last_merge)
 			q->last_merge = rq;
 	}
+	return true;
 }
 
 static void flow_insert_requests(struct blk_mq_hw_ctx *hctx,
@@ -520,9 +539,10 @@ static void flow_insert_requests(struct blk_mq_hw_ctx *hctx,
 {
 	struct request_queue *q = hctx->queue;
 	struct flow_data *fd = q->elevator->elevator_data;
-	struct request *rq;
+	struct request *rq, *tmp;
 	bool stop = false;
 	LIST_HEAD(free);
+	LIST_HEAD(fail);
 
 	do {
 		scoped_guard(spinlock_irqsave, &fd->lock)
@@ -533,11 +553,20 @@ static void flow_insert_requests(struct blk_mq_hw_ctx *hctx,
 			}
 			rq = list_first_entry(list, struct request, queuelist);
 			list_del_init(&rq->queuelist);
-			flow_insert_request(hctx, rq, insert_flags, &free);
+			if (!flow_insert_request(hctx, rq, insert_flags, &free)) {
+				/* Allocation failure — failed to schedule */
+				list_add_tail(&rq->queuelist, &fail);
+			}
 		}
 	} while (!stop);
 
 	blk_mq_free_requests(&free);
+
+	/* Complete failed requests with I/O error (after releasing fd->lock) */
+	list_for_each_entry_safe(rq, tmp, &fail, queuelist) {
+		list_del_init(&rq->queuelist);
+		blk_mq_end_request(rq, BLK_STS_IOERR);
+	}
 }
 
 /* ── Prepare / finish request lifecycle ───────────────────────────── */
@@ -644,15 +673,35 @@ static bool flow_fill_dispatch_locked(struct flow_data *fd,
 			break;
 
 		/* Increment starvation for all lanes below this one */
-		for (u8 l = lane + 1; l < FLOW_NR_LANES; l++)
-			khd->starvation_rounds[l]++;
+		for (u8 l = lane + 1; l < FLOW_NR_LANES; l++) {
+			if (khd->starvation_rounds[l] < U32_MAX)
+				khd->starvation_rounds[l]++;
+		}
 
 		rq = rd->rq;
 
-		/* Enforce per-hctx batch limits */
-		u8 optype = flow_optype(rq);
-		if (optype == FLOW_READ && rd_count >= fd->batch_max_read)
+		/* Enforce per-hctx batch limits — remove and reinsert to advance cursor */
+		if (optype == FLOW_READ && rd_count >= fd->batch_max_read) {
+			flow_remove_request(fd, rq, rq->q);
+			if (!flow_add_to_dl_tree(fd, lane, rq)) {
+				/* Reinsert failed — dispatch anyway to avoid data loss */
+				spin_lock(&khd->lock);
+				list_add_tail(&rq->queuelist, &khd->dispatch_list);
+				spin_unlock(&khd->lock);
+				if (optype == FLOW_READ) rd_count++;
+			}
 			continue;
+		}
+		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write) {
+			flow_remove_request(fd, rq, rq->q);
+			if (!flow_add_to_dl_tree(fd, lane, rq)) {
+				spin_lock(&khd->lock);
+				list_add_tail(&rq->queuelist, &khd->dispatch_list);
+				spin_unlock(&khd->lock);
+				if (optype == FLOW_WRITE) wr_count++;
+			}
+			continue;
+		}
 		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write)
 			continue;
 
@@ -801,7 +850,7 @@ static bool flow_allow_merge(struct request_queue *q, struct request *rq,
 
 	/* reject merges that cross lane boundaries (avoids priority inversion) */
 	if (rd) {
-		u8 rq_lane = rd->lane;
+		u8 rq_lane = READ_ONCE(rd->lane);
 		u8 bio_lane;
 
 		/* Determine what lane the bio would land in */
@@ -944,6 +993,43 @@ static void flow_exit_sched(struct elevator_queue *e)
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
 
+	/* Drain any pending requests still in the scheduler */
+	{
+		struct request *rq, *n;
+		LIST_HEAD(drain);
+
+		/* Collect from deadline rbtrees (simplified — all lanes) */
+		for (u8 lane = FLOW_LANE_RESERVED; lane < FLOW_NR_LANES; lane++) {
+			struct rb_root_cached *root = flow_root_for_lane(fd, lane);
+			struct rb_node *node;
+
+			if (!root)
+				continue;
+			while ((node = rb_first_cached(root))) {
+				struct dl_group *dlg = rb_entry(node, struct dl_group, node);
+				struct flow_rq_data *rd;
+
+				while ((rd = list_first_entry_or_null(&dlg->rqs,
+					struct flow_rq_data, dl_node))) {
+					list_del_init(&rd->dl_node);
+					rq = rd->rq;
+					list_add_tail(&rq->queuelist, &drain);
+				}
+				rb_erase_cached(&dlg->node, root);
+				kmem_cache_free(fd->dl_group_cache, dlg);
+			}
+		}
+
+		/* Move drain list entries to the block layer for completion */
+		list_for_each_entry_safe(rq, n, &drain, queuelist) {
+			list_del_init(&rq->queuelist);
+			if (rq->elv.priv[0]) {
+				mempool_free(get_rq_data(rq), fd->rq_data_pool);
+				rq->elv.priv[0] = NULL;
+			}
+		}
+	}
+
 	mempool_destroy(fd->rq_data_pool);
 	kmem_cache_destroy(fd->rq_data_cache);
 	kmem_cache_destroy(fd->dl_group_cache);
@@ -980,7 +1066,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 	if (!khd)
 		return;
 
-	WARN_ON_ONCE(!list_empty(&khd->dispatch_list));
+	if (WARN_ON_ONCE(!list_empty(&khd->dispatch_list))) {
+		struct request *rq, *n;
+
+		list_for_each_entry_safe(rq, n, &khd->dispatch_list, queuelist)
+			list_del_init(&rq->queuelist);
+	}
 
 	kfree(khd);
 	hctx->sched_data = NULL;

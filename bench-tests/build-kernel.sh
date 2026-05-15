@@ -345,6 +345,10 @@ apply_patches() {
     # 0001 is always applied for all supported versions
     if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch" ]; then
         patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch")
+        # 0003 fix patch (applies on top of 0001)
+        if [ -f "$patch_dir/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch" ]; then
+            patches_to_apply+=("$patch_dir/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch")
+        fi
     else
         die "0001 patch not found at $patch_dir/0001-linux7.0-flow-iosched-v1.1.0.patch"
     fi

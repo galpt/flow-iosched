@@ -191,8 +191,8 @@ contained lane until the score decays below the threshold again.
 
 | Kernel range | Notes |
 |---|---|
-| 7.0.x (CachyOS) | Default target — use source as-is.  (CachyOS ships `MQ_IOSCHED_ADIOS` which uses the same elevator API.) |
-| 6.18 – 6.19 | Same init_sched API as 7.x — use source as-is. |
+| 7.0.x (CachyOS) | Default target — use source as-is.  (CachyOS ships `MQ_IOSCHED_ADIOS` which uses the same elevator API.)  Apply `patches/0003` for memory-allocation safety and forward-progress fixes on top of `0001`. |
+| 6.18 – 6.19 | Same init_sched API as 7.x — apply `0001` + `0003`. |
 | 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after applying `patches/0001-linux7.0-flow-iosched-v1.1.0.patch`. |
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — a dedicated compat patch would be needed for this range. |
 
@@ -391,8 +391,8 @@ The script:
 
 | Range | Patches applied | Notes |
 |---|---|---|
-| 7.0.x | `0001` only | Default target |
-| 6.18 – 6.19 | `0001` only | Same init_sched API as 7.x |
+| 7.0.x | `0001` + `0003` | Default target |
+| 6.18 – 6.19 | `0001` + `0003` | Same init_sched API as 7.x |
 | 6.12 – 6.17 | `0001` + `0002` | Older init_sched signature |
 | 5.18 – 6.11 | — | Not supported (different elevator op API) |
 
