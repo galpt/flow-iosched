@@ -1,5 +1,5 @@
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index dcf5f8c..cefb174 100644
+index dcf5f8c..5ed9f72 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
 @@ -287,7 +287,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
@@ -266,7 +266,20 @@ index dcf5f8c..cefb174 100644
  	mempool_destroy(fd->rq_data_pool);
  	kmem_cache_destroy(fd->rq_data_cache);
  	kmem_cache_destroy(fd->dl_group_cache);
-@@ -980,7 +1067,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+@@ -961,8 +1048,11 @@ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+ 	struct flow_hctx_data *khd;
+ 
+ 	khd = kzalloc_node(sizeof(*khd), GFP_KERNEL, hctx->numa_node);
+-	if (!khd)
++	if (!khd) {
++		pr_err("flow-iosched: init_hctx failed for hctx %u (node %d)\n",
++		       hctx_idx, hctx->numa_node);
+ 		return -ENOMEM;
++	}
+ 
+ 	spin_lock_init(&khd->lock);
+ 	INIT_LIST_HEAD(&khd->dispatch_list);
+@@ -980,7 +1070,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
  	if (!khd)
  		return;
  
