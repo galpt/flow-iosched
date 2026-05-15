@@ -226,26 +226,33 @@ from scx_flow.  No sysfs intervention is needed for common workloads.
 > for kernels 6.12–6.17.  Apply 0001 first, then 0002 for 6.12–6.17.
 > The old v1.1.0 patches have been removed — v2.0.0 subsumes all fixes.
 
-### Building as a Standalone Module (Recommended)
+### Standalone Module Build (Recommended)
+
+The easiest way to try flow-iosched is the [`install-flow-ioshed.sh`](#install-flow-ioschedsh--build-and-install-as-a-standalone-module) script, which handles building, installation, and persistence automatically:
+
+```bash
+sudo ./bench-tests/install-flow-ioshed.sh
+```
+
+Alternatively, build manually against your running kernel:
+
+```bash
+cd block
+make -C /lib/modules/$(uname -r)/build M=$(pwd) \
+    CONFIG_MQ_IOSCHED_FLOW=m CC=clang LD=ld.lld \
+    KCFLAGS="-I/path/to/kernel-source/block" modules
+sudo insmod flow-iosched.ko
+echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
+```
 
 > [!TIP]
 > The standalone build does not require patching the kernel — build against
 > your running kernel's headers and load at runtime.
 >
 > Note: Some kernel distributions do not export `block/elevator.h` for
-> out-of-tree builds. In that case you can copy the header from the kernel
-> source tree or build the scheduler as an integrated module via the
-> `patches/` approach below.
-
-```bash
-cd block
-make -C /lib/modules/$(uname -r)/build M=$(pwd)
-sudo insmod flow-iosched.ko
-echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
-```
-
-To make the selection persist across reboots, add the `echo` line to your
-initramfs scripts (e.g. `/etc/initramfs-tools/scripts/init-top/`).
+> out-of-tree builds. The install script handles this automatically by
+> pointing the compiler at a matching kernel source tree.  If building
+> manually, you will need a kernel source tree available for the `-I` flag.
 
 ### Integrating Into a Kernel Tree
 
@@ -581,6 +588,52 @@ sudo ./bench-tests/remove-kernel.sh --all
 > [!CAUTION]
 > The script will refuse to remove the currently-booted kernel.  It also
 > prompts for confirmation before any removal.
+
+#### `install-flow-ioshed.sh` — Build and install as a standalone module
+
+No full kernel rebuild is needed.  This script builds `flow-iosched.ko`
+against your running kernel's headers, loads it, and makes it the default
+I/O scheduler permanently (across reboots) via a udev rule.  This is the
+recommended way to try flow-iosched on your existing system.
+
+```bash
+# One-time: build, install, and enable
+sudo ./bench-tests/install-flow-iosched.sh
+
+# Check status
+sudo ./bench-tests/install-flow-iosched.sh --status
+
+# Remove completely
+sudo ./bench-tests/install-flow-iosched.sh --remove
+```
+
+During the first run, the script will offer to download a matching kernel
+source from `cdn.kernel.org` if the necessary block-layer headers are not
+found locally — this is a one-time download (~210 MB).  The script detects
+the compiler used by your kernel (gcc or clang) and uses the corresponding
+toolchain automatically.
+
+What the script does:
+
+1. **Detects your toolchain** — clang + lld for CachyOS / Arch, gcc + ld
+   for other distributions
+2. **Finds or downloads kernel source** — looks in `/lib/modules/.../build/`,
+   your local kernel source cache, and `/usr/src/`; falls back to downloading
+   from `cdn.kernel.org`
+3. **Builds** `flow-iosched.ko` against the running kernel
+4. **Installs** to `/lib/modules/$(uname -r)/extra/` and runs `depmod -a`
+5. **Creates a udev rule** (`/etc/udev/rules.d/90-flow-iosched.rules`) that
+   selects flow-iosched for all NVMe, SATA, virtio, and MMC devices on boot
+6. **Loads** the module immediately (no reboot required)
+7. **`--remove`** undoes all of the above: restores the previous scheduler,
+   unloads the module, removes the udev rule and the `.ko` file
+
+> [!NOTE]
+> The udev rule selects flow-iosched for all eligible block devices at boot.
+> You can override per device at any time:
+> ```bash
+> echo mq-deadline | sudo tee /sys/block/<device>/queue/scheduler
+> ```
 
 ### Test Environment
 

@@ -1,9 +1,10 @@
-*.o
+block/elevator.h
+*.cmd
 *.ko
-*.mod.c
 *.mod
+*.mod.c
+modules.order
+Module.symvers
+*.o
 *.order
 *.symvers
-*.cmd
-Module.symvers
-modules.order
