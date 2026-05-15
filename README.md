@@ -378,6 +378,10 @@ For real hardware numbers (e.g. to publish IOPS or latency figures),
 pass the device path as the first argument.  The script auto-detects
 null_blk vs physical and skips the mounted-partition guard for null_blk.
 
+Each workload runs for 30 seconds by default.  This applies to both
+null_blk and real hardware.  Override with the `RUNTIME` environment
+variable (e.g. `RUNTIME=60` for 60 seconds per test).
+
 The device can also be set via the `DEVICE` environment variable, but
 the positional argument is preferred — some sudo configurations strip
 environment variables.
@@ -390,14 +394,14 @@ environment variables.
 > includes device latency — but the ratios are usefully predictive.
 
 ```bash
-# Default: null_blk virtual device (safe, scheduler-overhead comparison)
+# Default: null_blk virtual device, 30s per test (scheduler comparison)
 sudo ./bench-tests/run-benchmarks.sh
 
 # Real hardware: dedicated device with no mounted partitions
 sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
 
-# Alternative: env var (may be stripped by sudo on some systems)
-RUNTIME=60 DEVICE=/dev/nvme1n1 sudo ./bench-tests/run-benchmarks.sh
+# Longer runtime (both null_blk and real hardware)
+RUNTIME=60 sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
 ```
 
 Workloads tested:
