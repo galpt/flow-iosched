@@ -196,7 +196,7 @@ contained lane until the score decays below the threshold again.
 | 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after applying `patches/0001-linux7.0-flow-iosched-v1.1.0.patch`. |
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — a dedicated compat patch would be needed for this range. |
 
-The `patches/` directory follows the approach used by
+The [`patches/`](https://github.com/galpt/flow-iosched/tree/main/patches) directory follows the approach used by
 [ADIOS](https://github.com/firelzrd/adios), shipping separate patches per
 kernel cycle.
 
@@ -310,7 +310,7 @@ flow-iosched kernels.  Because the `elevator.h` header is not exported for
 out-of-tree module builds, the scheduler must be integrated into a kernel
 tree via the patches and built from source.
 
-The `benchmark-runs/` directory contains results and charts from the test
+The [`benchmark-runs/`](https://github.com/galpt/flow-iosched/tree/main/benchmark-runs) directory contains results and charts from the test
 environment described below.
 
 ### Results
@@ -376,7 +376,7 @@ The script:
 1. Downloads the kernel tarball from `cdn.kernel.org` and caches it in
    `./tmp/kernels/` (relative to the script)
 2. Extracts the source (skipped if already present)
-3. Clones the flow-iosched repo for patches if no local `patches/` directory
+3. Clones the flow-iosched repo for patches if no local [`patches/`](https://github.com/galpt/flow-iosched/tree/main/patches) directory
    is found — no need to download the repo manually
 4. Applies the correct patches for the target kernel version
 5. Configures using the running kernel's `.config` as baseline with
