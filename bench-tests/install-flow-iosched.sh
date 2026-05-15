@@ -74,12 +74,15 @@ cmd_status() {
         ok "Module loaded in kernel"
     else
         err "Module not loaded"
-        # Check if it failed due to signing or missing dependency
         local dmesg_hint
         dmesg_hint=$(dmesg 2>/dev/null | grep -i "$modname\|$MODULE_NAME" | tail -5)
         if [ -n "$dmesg_hint" ]; then
             echo "  Recent dmesg entries:"
             echo "$dmesg_hint" | sed 's/^/    /'
+        fi
+        # If installed, offer to load it
+        if [ -f "/lib/modules/$(uname -r)/extra/$MODULE_NAME.ko" ]; then
+            echo "  Run 'sudo $0' without arguments to load and activate."
         fi
     fi
 
@@ -320,17 +323,36 @@ load_module_now() {
     output=$(modprobe "$MODULE_NAME" 2>&1) || {
         output=$(insmod "/lib/modules/$(uname -r)/extra/$MODULE_FILE" 2>&1) || {
             echo "  modprobe/insmod output: $output"
-            die "Failed to load $MODULE_NAME. Check dmesg with: sudo dmesg | tail -20"
+            die "Failed to load $MODULE_NAME."
         }
     }
 
-    # Verify the module is actually loaded (modprobe can report success but
-    # the module may fail init and be immediately unloaded).
+    # Wait briefly and verify the module is actually loaded
+    # (modprobe can report success but the module may fail init
+    # and be immediately unloaded.)
+    sleep 0.5
     if ! lsmod | grep -q "^${MODULE_NAME//-/_}"; then
-        die "Module was loaded but immediately unloaded. Check dmesg."
+        echo "  Checking dmesg for load errors ..."
+        dmesg 2>/dev/null | grep -i "${MODULE_NAME//-/_}\|$MODULE_NAME" | tail -10
+        die "Module was loaded but immediately unloaded."
     fi
 
     ok "$MODULE_NAME loaded in kernel"
+
+    # Select flow-iosched on eligible block devices immediately,
+    # confirming it works end-to-end.
+    local activated=0
+    for dev in /sys/block/nvme[0-9]*n[0-9]* /sys/block/sd[a-z] /sys/block/sd[a-z][a-z] /sys/block/vd[a-z]* /sys/block/mmcblk[0-9]*; do
+        [ -f "$dev/queue/scheduler" ] || continue
+        local dev_name
+        dev_name="$(basename "$dev")"
+        if echo "flow-iosched" > "$dev/queue/scheduler" 2>/dev/null; then
+            activated=$((activated + 1))
+        fi
+    done
+    if [ "$activated" -gt 0 ]; then
+        ok "flow-iosched activated on $activated block device(s)"
+    fi
 }
 
 # ── Print post-install hints ──────────────────────────────────────────────────
