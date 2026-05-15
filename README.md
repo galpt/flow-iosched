@@ -283,23 +283,16 @@ demands a higher bar: an I/O scheduler operates on user data directly, and
 an undetected bug can cause data corruption or filesystem inconsistency —
 not merely degraded performance.
 
-The code has undergone two structured audits:
-
-1. **Initial release audit (v1.0):** Reviewed starvation rounds, containment
-   scoring, budget arithmetic, memory allocation paths, and rbtree lifecycle
-   correctness.  All internal functions carry lockdep annotations, and lock
-   ordering (hctx lock → queue lock) is enforced to prevent deadlock across
-   parallel dispatch contexts.  This audit discovered and fixed a scheduling
-   bypass bug where every non-emergency request was incorrectly added to a
-   FIFO tracking list alongside its lane rbtree, causing dispatch to bypass
-   the lane priority system entirely.
-
-2. **v1.1 audit (May 2026):** Reviewed memory safety, request lifecycle,
-   lock correctness, integer safety, and error-path robustness.  Found and
-   fixed seven issues, including a critical allocation-failure path that
-   could silently drop I/O requests under memory pressure.  All findings
-   are addressed in [`patches/0003`](https://github.com/galpt/flow-iosched/blob/main/patches/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch).
-   See the patch description for the full list of fixes.
+The code has been audited for memory safety, request lifecycle correctness,
+lock ordering, integer safety, and error-path robustness.  All internal
+functions carry lockdep annotations, and lock ordering (hctx lock → queue
+lock) is enforced to prevent deadlock across parallel dispatch contexts.
+The initial audit caught a scheduling bypass bug where requests were
+incorrectly added to a FIFO tracking list alongside the lane rbtree,
+bypassing the priority system entirely.  A follow-up audit in May 2026
+addressed seven additional issues found through structured review;
+the fixes are available in
+[`patches/0003`](https://github.com/galpt/flow-iosched/blob/main/patches/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch).
 
 > [!NOTE]
 > flow-iosched clears `QUEUE_FLAG_SQ_SCHED` and dispatches independently per
