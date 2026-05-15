@@ -327,14 +327,24 @@ load_module_now() {
         }
     }
 
-    # Wait briefly and verify the module is actually loaded
-    # (modprobe can report success but the module may fail init
-    # and be immediately unloaded.)
+    # Wait briefly and verify the module is actually loaded.
+    # Checking lsmod can race with module cleanup on some kernels
+    # (the module taints the kernel when unsigned, and some configs
+    # treat tainted modules differently).  Instead, check whether
+    # the scheduler appears in any block device's available list.
     sleep 0.5
-    if ! lsmod | grep -q "^${MODULE_NAME//-/_}"; then
+    local scheduler_ok=false
+    for dev in /sys/block/*/queue/scheduler; do
+        if grep -q "flow-iosched" "$dev" 2>/dev/null; then
+            scheduler_ok=true
+            break
+        fi
+    done
+
+    if ! $scheduler_ok; then
         echo "  Checking dmesg for load errors ..."
         dmesg 2>/dev/null | grep -i "${MODULE_NAME//-/_}\|$MODULE_NAME" | tail -10
-        die "Module was loaded but immediately unloaded."
+        die "Module loaded but flow-iosched scheduler not registered."
     fi
 
     ok "$MODULE_NAME loaded in kernel"
