@@ -679,6 +679,7 @@ static bool flow_fill_dispatch_locked(struct flow_data *fd,
 		}
 
 		rq = rd->rq;
+		u8 optype = flow_optype(rq);
 
 		/* Enforce per-hctx batch limits — remove and reinsert to advance cursor */
 		if (optype == FLOW_READ && rd_count >= fd->batch_max_read) {
