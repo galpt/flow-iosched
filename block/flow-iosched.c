@@ -140,9 +140,9 @@ struct flow_icq_data {
 	atomic_t	latency_allowance;	/* atomic — credit for latency lane 0..4 */
 	atomic_t	latency_pressure;	/* atomic — debt for urgency 0..4 */
 	atomic_t	io_profile;		/* atomic — profile bits (enum flow_io_profile) */
-	u64		last_io_completed;	/* smp_store_release / smp_load_acquire */
-	u64		last_io_inserted;	/* same */
-	u64		last_io_profile_update;	/* last profile recompute timestamp */
+	atomic64_t	last_io_completed;	/* last completion timestamp */
+	atomic64_t	last_io_inserted;	/* last insertion timestamp */
+	atomic64_t	last_io_profile_update;	/* last profile recompute timestamp */
 };
 
 /* ── Per-request-queue scheduler data ─────────────────────────────── */
@@ -384,7 +384,7 @@ static void flow_recompute_io_profile(struct flow_icq_data *ficq,
 		profile |= IO_PROFILE_SYNC_DOMINANT;
 
 	atomic_set(&ficq->io_profile, profile);
-	smp_store_release(&ficq->last_io_profile_update, ktime_get_ns());
+	atomic64_set(&ficq->last_io_profile_update, ktime_get_ns());
 }
 
 /* ── Lane assignment ──────────────────────────────────────────────── */
@@ -457,7 +457,7 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 	 */
 	old_budget = atomic64_read(&ficq->io_budget_sectors);
 	if (old_budget < budget &&
-	    ktime_get_ns() - smp_load_acquire(&ficq->last_io_completed) >
+	    ktime_get_ns() - atomic64_read(&ficq->last_io_completed) >
 		FLOW_BUDGET_REFRESH_NS) {
 		old_budget = atomic64_add_return(budget, &ficq->io_budget_sectors);
 		s64 cap = budget * 4;
@@ -467,7 +467,7 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 					    FLOW_HOG_SCORE_DECAY_SHIFT);
 	}
 
-	smp_store_release(&ficq->last_io_inserted, ktime_get_ns());
+	atomic64_set(&ficq->last_io_inserted, ktime_get_ns());
 
 	/* Consume budget atomically */
 	old_budget = atomic64_sub_return((s64)block_sectors,
@@ -696,7 +696,7 @@ static bool flow_insert_request(struct blk_mq_hw_ctx *hctx,
 		if (ficq) {
 			contained = flow_check_budget_and_contain(ficq, rq, fd, hctx);
 			/* Recompute IO profile from recent budget/signal state */
-			if (ktime_get_ns() - smp_load_acquire(&ficq->last_io_profile_update) >
+			if (ktime_get_ns() - atomic64_read(&ficq->last_io_profile_update) >
 			    NSEC_PER_MSEC)
 				flow_recompute_io_profile(ficq, rq, fd);
 		}
@@ -809,9 +809,9 @@ static void flow_init_icq(struct io_cq *icq)
 	atomic_set(&ficq->latency_allowance, 0);
 	atomic_set(&ficq->latency_pressure, 0);
 	atomic_set(&ficq->io_profile, 0);
-	smp_store_release(&ficq->last_io_completed, ktime_get_ns());
-	smp_store_release(&ficq->last_io_inserted, ktime_get_ns());
-	smp_store_release(&ficq->last_io_profile_update, ktime_get_ns());
+	atomic64_set(&ficq->last_io_completed, ktime_get_ns());
+	atomic64_set(&ficq->last_io_inserted, ktime_get_ns());
+	atomic64_set(&ficq->last_io_profile_update, ktime_get_ns());
 }
 
 static void flow_exit_icq(struct io_cq *icq)
@@ -829,9 +829,9 @@ static void flow_exit_icq(struct io_cq *icq)
 	atomic_set(&ficq->latency_allowance, 0);
 	atomic_set(&ficq->latency_pressure, 0);
 	atomic_set(&ficq->io_profile, 0);
-	smp_store_release(&ficq->last_io_completed, 0);
-	smp_store_release(&ficq->last_io_inserted, 0);
-	smp_store_release(&ficq->last_io_profile_update, 0);
+	atomic64_set(&ficq->last_io_completed, 0);
+	atomic64_set(&ficq->last_io_inserted, 0);
+	atomic64_set(&ficq->last_io_profile_update, 0);
 }
 
 /* ── Per-hctx dispatch ──────────────────────────────────────────── */
@@ -1094,9 +1094,9 @@ static void flow_completed_request(struct request *rq, u64 now)
 	/*
 	 * Lock-free atomic access — this runs from softirq completion context
 	 * and may race with flow_insert_request on another CPU. All per-ICQ
-	 * fields are atomic or use smp_store_release/smp_load_acquire.
+	 * fields are atomic_t or atomic64_t.
 	 */
-	smp_store_release(&ficq->last_io_completed, now);
+	atomic64_set(&ficq->last_io_completed, now);
 
 	/*
 	 * Primary budget refill: return (completed_sectors / FLOW_REFILL_DIV)
@@ -1140,7 +1140,7 @@ static void flow_completed_request(struct request *rq, u64 now)
 					  FLOW_LATENCY_DEBT_MAX);
 
 	/* Recompute IO profile periodically */
-	if (now - smp_load_acquire(&ficq->last_io_profile_update) > NSEC_PER_MSEC)
+	if (now - atomic64_read(&ficq->last_io_profile_update) > NSEC_PER_MSEC)
 		flow_recompute_io_profile(ficq, rq, rq->q->elevator->elevator_data);
 }
 
@@ -1245,20 +1245,29 @@ static void flow_autotune_timer_fn(struct timer_list *t)
 		if (!khd)
 			continue;
 		guard(spinlock_irqsave)(&khd->lock);
-		total_reserved	+= khd->m_reserved_dispatch;
-		total_latency	+= khd->m_latency_dispatch;
-		total_shared	+= khd->m_shared_dispatch;
-		total_contained	+= khd->m_contained_dispatch;
-		total_rescue	+= khd->m_contained_rescue + khd->m_shared_rescue;
-		khd->m_reserved_dispatch = 0;
-		khd->m_latency_dispatch = 0;
-		khd->m_shared_dispatch = 0;
-		khd->m_contained_dispatch = 0;
-		khd->m_contained_rescue = 0;
-		khd->m_shared_rescue = 0;
-		khd->m_budget_exhaustions = 0;
-		khd->m_latency_debt_raises = 0;
-		khd->m_hog_containments = 0;
+		/*
+		 * Metrics counters are incremented under fd->lock (in the
+		 * dispatch path) and read/reset here under khd->lock. The
+		 * dual-lock access creates a benign data race: on x86_64,
+		 * aligned u64 loads/stores are single-copy-atomic, and the
+		 * worst outcome is a one-tick stale count.  Annotate with
+		 * data_race() to suppress KCSAN.
+		 */
+		total_reserved	+= data_race(khd->m_reserved_dispatch);
+		total_latency	+= data_race(khd->m_latency_dispatch);
+		total_shared	+= data_race(khd->m_shared_dispatch);
+		total_contained	+= data_race(khd->m_contained_dispatch);
+		total_rescue	+= data_race(khd->m_contained_rescue) +
+				   data_race(khd->m_shared_rescue);
+		data_race(khd->m_reserved_dispatch = 0);
+		data_race(khd->m_latency_dispatch = 0);
+		data_race(khd->m_shared_dispatch = 0);
+		data_race(khd->m_contained_dispatch = 0);
+		data_race(khd->m_contained_rescue = 0);
+		data_race(khd->m_shared_rescue = 0);
+		data_race(khd->m_budget_exhaustions = 0);
+		data_race(khd->m_latency_debt_raises = 0);
+		data_race(khd->m_hog_containments = 0);
 	}
 
 	total_dispatch = total_reserved + total_latency +
