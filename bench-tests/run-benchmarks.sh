@@ -38,6 +38,20 @@ fi
 DEVICE="${1:-${DEVICE:-/dev/nullb0}}"
 [ $# -gt 0 ] && shift  # consume positional arg so other args can be added later
 
+# Resolve the parent block device name for scheduler operations
+# (partitions don't have their own scheduler — it's at the device level)
+DEVNAME=$(basename "$DEVICE")
+# Strip partition numbers: nvme0n1p1 → nvme0n1, sda1 → sda
+BLOCK_DEV="${DEVNAME%%p[0-9]*}"
+if [ "$BLOCK_DEV" = "$DEVNAME" ]; then
+    # No 'pN' suffix — might be sda1, sda2 style
+    BLOCK_DEV=$(echo "$DEVNAME" | sed 's/[0-9]*$//')
+fi
+# If the resolved name doesn't exist in sysfs, fall back to the original name
+if [ ! -d "/sys/block/${BLOCK_DEV}" ]; then
+    BLOCK_DEV="$DEVNAME"
+fi
+
 # If using null_blk, auto-load and set up cleanup
 NULLBLK_CLEANUP=false
 if [[ "$DEVICE" == /dev/nullb* ]] || [[ "$DEVICE" == nullb* ]]; then
@@ -98,7 +112,7 @@ echo ""
 # Try to make flow-iosched available: check sysfs, then modprobe, then
 # attempt to write the scheduler directly (matching io-scheduler-setup's
 # approach of actively testing whether the kernel accepts it).
-if ! grep -qw "flow-iosched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
+if ! grep -qw "flow-iosched" /sys/block/${BLOCK_DEV}/queue/scheduler 2>/dev/null; then
     if modinfo -n flow-iosched &>/dev/null; then
         if ! lsmod 2>/dev/null | grep -q "^flow_iosched "; then
             echo "  Loading flow-iosched module..."
@@ -107,8 +121,7 @@ if ! grep -qw "flow-iosched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>
     fi
     # Actively try to set it — this is what io-scheduler-setup does
     # and it may succeed even when the scheduler isn't in the sysfs list.
-    DEVNAME=$(basename "$DEVICE")
-    SYSFS_PATH="/sys/block/${DEVNAME}/queue/scheduler"
+    SYSFS_PATH="/sys/block/${BLOCK_DEV}/queue/scheduler"
     if [ -f "$SYSFS_PATH" ]; then
         CURRENT=$(cat "$SYSFS_PATH" 2>/dev/null || echo "")
         echo flow-iosched | sudo tee "$SYSFS_PATH" >/dev/null 2>&1 && \
@@ -125,7 +138,7 @@ fi
 SCHEDULERS="${SCHEDULERS:-}"
 if [ -z "$SCHEDULERS" ]; then
     for s in none mq-deadline kyber bfq adios flow-iosched; do
-        if grep -qw "$s" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
+        if grep -qw "$s" /sys/block/${BLOCK_DEV}/queue/scheduler 2>/dev/null; then
             SCHEDULERS="$SCHEDULERS $s"
         fi
     done
@@ -144,7 +157,7 @@ bench() {
     sudo blockdev --flushbufs "$DEVICE" 2>/dev/null || true
 
     # Select scheduler
-    echo "$scheduler" | sudo tee /sys/block/$(basename "$DEVICE")/queue/scheduler > /dev/null
+    echo "$scheduler" | sudo tee /sys/block/${BLOCK_DEV}/queue/scheduler > /dev/null
 
     echo "  [${scheduler}] ${name} (bs=${bs}, depth=${iodepth}, mix=${rwmix}) ..."
 
@@ -171,7 +184,7 @@ echo "scheduler,workload,read_iops,write_iops,read_lat_us,write_lat_us" \
     > "$RESULTS_DIR/summary.csv"
 
 for sched in $SCHEDULERS; do
-    if ! grep -q "$sched" /sys/block/$(basename "$DEVICE")/queue/scheduler 2>/dev/null; then
+    if ! grep -q "$sched" /sys/block/${BLOCK_DEV}/queue/scheduler 2>/dev/null; then
         echo "  [${sched}] SKIPPED — not available on this kernel"
         continue
     fi
