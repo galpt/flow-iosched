@@ -272,7 +272,7 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 flow-iosched is adapted from the lane-based design of
 [scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow),
 a sched_ext CPU scheduler developed alongside this project. scx_flow
-[v2.2.0](https://github.com/sched-ext/scx/pull/3525) was released on 15 April 2026 and has since accumulated several maintenance releases. It is used internally at [v.recipes](https://v.recipes) for
+[v2.2.0](https://github.com/sched-ext/scx/pull/3525) was released on 15 April 2026 and has since accumulated several maintenance releases. scx_flow is used internally at [v.recipes](https://v.recipes) for
 production-adjacent workloads and is considered stable for general-purpose
 desktop and home-server use.
 
