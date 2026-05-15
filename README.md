@@ -306,14 +306,52 @@ hardware and workloads.
 
 The [`bench-tests/`](https://github.com/galpt/flow-iosched/tree/main/bench-tests)
 directory provides build, test, analysis, install, and cleanup scripts for
-cleaning up flow-iosched kernels.  Because the `elevator.h` header is not
-exported for out-of-tree module builds, the scheduler must be integrated
-into a kernel tree via the patches and built from source.
+flow-iosched kernels.  Because the `elevator.h` header is not exported for
+out-of-tree module builds, the scheduler must be integrated into a kernel
+tree via the patches and built from source.
+
+The `benchmark-runs/` directory contains results and charts from the test
+environment described below.
+
+### Results
+
+All five workloads were run for 30 seconds each per scheduler on two device
+types.  The charts below show each scheduler's throughput and latency.
+
+#### null_blk (synthetic RAM device)
+
+null_blk is a kernel virtual block device with near-zero I/O latency (memory
+copy only).  Results measure the scheduler's CPU overhead and dispatch logic
+without the confounding factor of physical device latency.  Scheduler ranking
+tends to be consistent between null_blk and real hardware — if flow-iosched
+is 15% faster on null_blk, it will generally be faster on real NVMe too.
+The absolute IOPS numbers are not representative of real hardware.
+
+| Chart | Description |
+|---|---|
+| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** per workload — higher is better.  Flow-iosched and none are consistently ahead, with BFQ CPU overhead reducing throughput on this memory-backed device. |
+| ![Latency](benchmark-runs/null_blk/charts/latency.png) | **Read latency** per workload — lower is better.  The logarithmic scale accommodates the wide range (BFQ is 4–5× slower than the rest on null_blk due to its per-process queue accounting overhead).  Write-only workloads (Rand Write 4k, Seq Write 128k) naturally have no read latency. |
+| ![Per-workload IOPS](benchmark-runs/null_blk/charts/per_workload.png) | **Per-workload IOPS** sorted best to worst — makes the scheduler ordering clear for each workload individually. |
+| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Consolidated averages** across all workloads, sorted best to worst per metric.  IOPS averaged from all five workloads; read and write latency averaged from read- and write-capable workloads respectively. |
+
+#### Physical device (Intel NVMe, `/dev/nvme0n1p1`)
+
+The same benchmarks run on a real NVMe partition (Intel SSD on the secondary
+NVMe slot, `nvme0n1p1`).  These numbers reflect actual device I/O, including
+NVMe controller latency and PCIe transfer overhead.
+
+| Chart | Description |
+|---|---|
+| ![IOPS](benchmark-runs/physical_device/charts/iops.png) | **Total IOPS** per workload.  The gap between schedulers narrows compared to null_blk because physical I/O latency becomes the dominant factor. |
+| ![Latency](benchmark-runs/physical_device/charts/latency.png) | **Read latency** per workload.  All schedulers converge more closely than on null_blk — the device's own latency masks scheduler overhead on sequential and mixed workloads. |
+| ![Per-workload IOPS](benchmark-runs/physical_device/charts/per_workload.png) | **Per-workload IOPS** sorted best to worst. |
+| ![Consolidated averages](benchmark-runs/physical_device/charts/comparison.png) | **Consolidated averages** across all workloads.  Note the narrower spread — the physical device is the bottleneck, not the scheduler. |
 
 > [!NOTE]
-> Benchmark results are not yet available for publication.  The workloads
-> described below are the planned test suite.  Results will be added here
-> once the integration build is complete and runs have been collected.
+> The test kernel in these runs is `7.0.5-flow` with flow-iosched built in
+> (`CONFIG_MQ_IOSCHED_FLOW=y`), booted on the CachyOS host system.  The
+> `null_blk` charts were measured first, then the physical device — both
+> on the same boot session to minimise variation.
 
 ### Scripts
 

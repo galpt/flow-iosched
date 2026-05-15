@@ -1,0 +1,4 @@
+device=/dev/nullb0
+label=null_blk (synthetic RAM device)
+runtime=30
+null_blk=true
