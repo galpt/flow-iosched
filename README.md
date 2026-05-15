@@ -8,6 +8,10 @@ CPU scheduler.
 > [!NOTE]
 > flow-iosched targets the same audience as its CPU-side inspiration: general-purpose
 > desktop and workstation machines where responsiveness and throughput both matter.
+> Version 2.0.0 brings the I/O scheduler up to parity with scx_flow's lane architecture
+> including proportional budget refill, bounded signal decay, latency credit/debt
+> tracking, per-process IO profiles, a starvation quota mechanism, and a 3-mode
+> autotuner that eliminates the need for manual tuning.
 
 ## Overview
 
@@ -97,32 +101,39 @@ Multiple hardware queues."]
     J1["Budget & Containment
 
 Per-process flow_icq_data via icq_size.
-Tracks io_budget_sectors. On insert:
-refill budget and decay score if idle
-> 100 ms, then deduct sectors from
-budget. If budget < 0, containment_score
-+= 10. If score >= 100, demote to the
-Contained lane. Idle refill also
-decays containment_score by 8."]
+All fields are atomic (atomic64_t/atomic_t).
+Primary refill: proportional (sectors / 100)
+on every I/O completion (lock-free,
+no fd->lock). Secondary refill on idle
+> 100 ms. Budget < 0 raises containment
+score via bounded CAS (max 100).
+Score decays geometrically on each
+completion. Latency allowance raised
+on positive budget growth; latency
+pressure raised on containment."]
 
-    K1["Starvation Tracking
+    K1["Starvation & Quota Tracking
 
 Per-hctx starvation_rounds[5] array.
-Each time dispatch skips a lane, its
-round counter increments. When rounds
->= starvation_max[lane], force-dispatch
-from that lane and reset the counter.
-Default thresholds: Reserved = 5,
-Shared = 20, Contained = 30."]
+When rounds >= starvation_max[lane],
+force-dispatch from that lane.
+Also: high_priority_burst_rounds counter.
+When >= high_priority_quota_max (def 4),
+forces lower-lane dispatch even before
+starvation max is reached, then resets.
+Default starvation thresholds:
+Reserved = 5, Shared = 20, Contained = 30."]
 
     L1["ICQ Lifecycle
 
-flow_init_icq() zero-initialises
-flow_icq_data and sets timestamps.
-flow_exit_icq() memsets data to zero
-on teardown, preventing use-after-free.
-Both are NULL-guarded. Wired via
-.init_icq / .exit_icq elevator ops."]
+flow_init_icq() initialises budget to
+2048 sectors (atomic64_set), all other
+fields to 0 via atomic_set, and timestamps
+via smp_store_release. flow_exit_icq()
+resets each field atomically (no memset).
+Both are NULL-guarded. Completion path
+uses lock-free atomics; insertion path
+also lock-free for per-ICQ fields."]
 
     A1 --> B1
     B1 --> N3
@@ -164,23 +175,34 @@ Both are NULL-guarded. Wired via
 ```
 
 Each request is classified into a lane at insertion time based on its
-`cmd_flags` (sync, meta, flush, priority) and the originating process's I/O
-budget balance.  Per-lane deadline-sorted red-black trees (plus two FIFO
-priority queues for the barrier tiers) are the primary scheduling state.
+`cmd_flags` (sync, meta, flush, priority), the originating process's I/O
+budget balance, and the per-process IO profile (computed from recent budget
+and latency signal history).  Per-lane deadline-sorted red-black trees (plus
+two FIFO priority queues for the barrier tiers) are the primary scheduling
+state.
 
 Dispatch uses a per-hardware-context fast-path: each hardware context
-maintains its own dispatch list and starvation counters.  The dispatcher
-first attempts a lock-free pop from the per-hctx dispatch list; if empty,
-it walks the global lane trees under a short-lived lock to refill the list.
-This allows independent dispatch across multiple hardware queues while
-preserving the lane priority order.  Starvation is tracked as round
-counters per lane — when a lane accumulates enough consecutive bypasses the
-scheduler force-dispatches from it, ensuring fairness without wall-clock
-timers.
+maintains its own dispatch list, starvation counters, and a
+high-priority-burst quota counter.  The dispatcher first attempts a
+lock-free pop from the per-hctx dispatch list; if empty, it walks the
+global lane trees under a short-lived lock to refill the list.  This allows
+independent dispatch across multiple hardware queues while preserving the
+lane priority order.  Starvation is tracked as round counters per lane and
+as burst-quota rounds: when a lane accumulates enough consecutive bypasses
+the scheduler force-dispatches from it; when high-priority bursts exceed the
+quota threshold, lower lanes are served preemptively.
 
-Processes that exceed their I/O budget accumulate a containment score; once
-the score passes the containment threshold their I/O is demoted to the
-contained lane until the score decays below the threshold again.
+All per-process scheduling state (budget, containment score, latency
+allowance, latency pressure, IO profile) uses atomic operations and is
+accessed without the global lock.  The I/O completion path updates these
+fields lock-free, making the primary budget refill mechanism (proportional
+refill of completed_sectors / 100 on each completion) contention-free.
+
+A 3-mode autotuner (Balanced / Latency / Throughput) runs every second.
+It aggregates per-hctx dispatch metrics, computes workload ratios
+(latency, rescue, contained, shared), and adjusts batch sizes and starvation
+thresholds toward the mode target using step-wise parameter tuning ported
+from scx_flow.  No sysfs intervention is needed for common workloads.
 
 > [!TIP]
 > For a deeper walkthrough of the lane classification, budget refill mechanics,
@@ -191,14 +213,17 @@ contained lane until the score decays below the threshold again.
 
 | Kernel range | Notes |
 |---|---|
-| 7.0.x (CachyOS) | Default target — use source as-is.  (CachyOS ships `MQ_IOSCHED_ADIOS` which uses the same elevator API.)  Apply `patches/0003` for memory-allocation safety and forward-progress fixes on top of `0001`. |
-| 6.18 – 6.19 | Same init_sched API as 7.x — apply `0001` + `0003`. |
-| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply `patches/0002-linux6.12-flow-iosched-compat.patch` after applying `patches/0001-linux7.0-flow-iosched-v1.1.0.patch`. |
-| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — a dedicated compat patch would be needed for this range. |
+| 7.0.x (CachyOS) | Default target — the source as-is targets this API. |
+| 6.18 – 6.19 | Same init_sched API as 7.x — compatible as-is. |
+| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply the existing `patches/0002-linux6.12-flow-iosched-compat.patch` for API compatibility, then build from the v2.0.0 source. |
+| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
-The [`patches/`](https://github.com/galpt/flow-iosched/tree/main/patches) directory follows the approach used by
-[ADIOS](https://github.com/firelzrd/adios), shipping separate patches per
-kernel cycle.
+> [!IMPORTANT]
+> The existing `patches/0001` and `patches/0003` are for the v1.1.0 source and are
+> **not compatible** with v2.0.0.  For v2.0.0, the scheduler ships as a single
+> source file (`block/flow-iosched.c`) — use the standalone module build or
+> apply the compat patch for 6.12–6.17 if needed.  New integrated patches for
+> v2.0.0 will be published in a future release.
 
 ### Building as a Standalone Module (Recommended)
 
@@ -223,16 +248,33 @@ initramfs scripts (e.g. `/etc/initramfs-tools/scripts/init-top/`).
 
 ### Integrating Into a Kernel Tree
 
-1. Apply `patches/0001-linux7.0-flow-iosched-v1.1.0.patch` — creates the
-   scheduler source, Kconfig entry, and Makefile target.
-2. For kernels 6.12 – 6.17, also apply
-   `patches/0002-linux6.12-flow-iosched-compat.patch`.
-3. Enable `CONFIG_MQ_IOSCHED_FLOW=m` (or `=y`) in your kernel config.
-4. Build and install the kernel, then select the scheduler at runtime:
+Place `block/flow-iosched.c` into your kernel source's `block/` directory,
+then add the Kconfig and Makefile entries:
 
-   ```bash
-   echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
-   ```
+```c
+// Kconfig (in block/Kconfig.iosched):
+config MQ_IOSCHED_FLOW
+    tristate "Multi-Lane I/O scheduler (FLOW)"
+    default m
+    help
+      Multi-lane I/O scheduler adapted from scx_flow. Provides five
+      priority tiers with deadline-sorted dispatch, per-process budget
+      containment, latency credit/debt tracking, and 3-mode autotuning.
+
+// Makefile (in block/Makefile):
+obj-$(CONFIG_MQ_IOSCHED_FLOW) += flow-iosched.o
+```
+
+For kernels 6.12 – 6.17, also apply
+`patches/0002-linux6.12-flow-iosched-compat.patch` for the older
+`init_sched` and `depth_updated` API signatures.
+
+Enable `CONFIG_MQ_IOSCHED_FLOW=m` (or `=y`) in your kernel config,
+build and install the kernel, then select the scheduler at runtime:
+
+```bash
+echo flow-iosched | sudo tee /sys/block/<device>/queue/scheduler
+```
 
 > [!IMPORTANT]
 > The `CONFIG_MQ_IOSCHED_DEFAULT_FLOW` Kconfig option lets you make
@@ -247,18 +289,17 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `flow_version` | RO | — | Current scheduler version |
+| `flow_version` | RO | — | Current scheduler version (2.0.0) |
 | `read_priority` | RW | 0 | Read bias vs writes at same deadline (-20 to 19) |
 | `sync_budget_sectors` | RW | 2048 | Reserved lane budget per sync dispatch |
 | `async_budget_sectors` | RW | 512 | Shared lane budget per async dispatch |
-| `batch_max_read` | RW | 16 | Max read requests per batch |
+| `batch_max_read` | RW | 16 | Max read requests per batch (adjusted by autotune) |
 | `batch_max_write` | RW | 16 | Max write requests per batch |
 | `completion_window_ns` | RW | 8000000 | Dispatch batch window (nanoseconds) |
 | `starvation_max_reserved` | RW | 5 | Reserved starvation rounds before forced rotation |
 | `starvation_max_shared` | RW | 20 | Shared starvation rounds before forced dispatch |
 | `starvation_max_contained` | RW | 30 | Contained starvation rounds before rescue |
 | `contain_threshold` | RW | 100 | Hog containment activation score |
-| `contain_decay_step` | RW | 8 | Containment score decay per idle interval |
 
 ## Production Ready?
 
@@ -285,12 +326,13 @@ The code has been audited for memory safety, request lifecycle correctness,
 lock ordering, integer safety, and error-path robustness.  All internal
 functions carry lockdep annotations, and lock ordering (hctx lock → queue
 lock) is enforced to prevent deadlock across parallel dispatch contexts.
-The initial audit caught a scheduling bypass bug where requests were
-incorrectly added to a FIFO tracking list alongside the lane rbtree,
-bypassing the priority system entirely.  A follow-up audit on 15 May 2026
-addressed seven additional issues found through structured review;
-the fixes are available in
-[`patches/0003`](https://github.com/galpt/flow-iosched/blob/main/patches/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch).
+Version 2.0.0 underwent a structured review that caught a CAS retry-loop
+livelock in the atomic helper functions (fixed during review), verified all
+per-ICQ fields use correct atomic_t/atomic64_t access with memory barriers,
+confirmed lock ordering in the dispatch path, and audited the autotune timer
+for proper teardown via del_timer_sync.  All per-process scheduling state is
+now accessed without the global fd->lock on the completion path, eliminating
+the primary contention point between multi-queue dispatch and completion.
 
 > [!NOTE]
 > flow-iosched clears `QUEUE_FLAG_SQ_SCHED` and dispatches independently per
@@ -307,48 +349,19 @@ flow-iosched kernels.  Because the `elevator.h` header is not exported for
 out-of-tree module builds, the scheduler must be integrated into a kernel
 tree via the patches and built from source.
 
-The [`benchmark-runs/`](https://github.com/galpt/flow-iosched/tree/main/benchmark-runs) directory contains results and charts from the test
-environment described below.
+The [`benchmark-runs/`](https://github.com/galpt/flow-iosched/tree/main/benchmark-runs) directory contains results and charts from the
+v1.1.0-era test environment (described below).  These results were produced
+before the budget system was redesigned in v2.0.0 and are **not representative**
+of the current scheduler's behaviour.  Version 2.0.0 benchmarks will be
+published once collected.
 
-### Results
+### Results (v1.1.0 — superseded)
 
 All five workloads were run for 30 seconds each per scheduler on two device
-types.  The charts below show each scheduler's throughput and latency.
-
-#### null_blk (synthetic RAM device)
-
-null_blk is a kernel virtual block device with near-zero I/O latency (memory
-copy only).  Results measure the scheduler's CPU overhead and dispatch logic
-without the confounding factor of physical device latency.  Scheduler ranking
-tends to be consistent between null_blk and real hardware — if flow-iosched
-is 15% faster on null_blk, it will generally be faster on real NVMe too.
-The absolute IOPS numbers are not representative of real hardware.
-
-| Chart | Description |
-|---|---|
-| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** per workload — higher is better.  Flow-iosched and none are consistently ahead, with BFQ CPU overhead reducing throughput on this memory-backed device. |
-| ![Latency](benchmark-runs/null_blk/charts/latency.png) | **Read latency** per workload — lower is better.  The logarithmic scale accommodates the wide range (BFQ is 4–5× slower than the rest on null_blk due to its per-process queue accounting overhead).  Write-only workloads (Rand Write 4k, Seq Write 128k) naturally have no read latency. |
-| ![Per-workload IOPS](benchmark-runs/null_blk/charts/per_workload.png) | **Per-workload IOPS** sorted best to worst — makes the scheduler ordering clear for each workload individually. |
-| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Consolidated averages** across all workloads, sorted best to worst per metric.  IOPS averaged from all five workloads; read and write latency averaged from read- and write-capable workloads respectively. |
-
-#### Physical device (Intel NVMe, `/dev/nvme0n1p1`)
-
-The same benchmarks run on a real NVMe partition (Intel SSD on the secondary
-NVMe slot, `nvme0n1p1`).  These numbers reflect actual device I/O, including
-NVMe controller latency and PCIe transfer overhead.
-
-| Chart | Description |
-|---|---|
-| ![IOPS](benchmark-runs/physical_device/charts/iops.png) | **Total IOPS** per workload.  The gap between schedulers narrows compared to null_blk because physical I/O latency becomes the dominant factor. |
-| ![Latency](benchmark-runs/physical_device/charts/latency.png) | **Read latency** per workload.  All schedulers converge more closely than on null_blk — the device's own latency masks scheduler overhead on sequential and mixed workloads. |
-| ![Per-workload IOPS](benchmark-runs/physical_device/charts/per_workload.png) | **Per-workload IOPS** sorted best to worst. |
-| ![Consolidated averages](benchmark-runs/physical_device/charts/comparison.png) | **Consolidated averages** across all workloads.  Note the narrower spread — the physical device is the bottleneck, not the scheduler. |
-
-> [!NOTE]
-> The test kernel in these runs is `7.0.5-flow` with flow-iosched built in
-> (`CONFIG_MQ_IOSCHED_FLOW=y`), booted on the CachyOS host system.  The
-> `null_blk` charts were measured first, then the physical device — both
-> on the same boot session to minimise variation.
+types.  These numbers pre-date the v2.0.0 budget redesign; flow-iosched's
+performance in these charts was measured with the broken budget system that
+effectively degenerated to a single FIFO queue.  The charts are retained for
+reference and will be replaced once v2.0.0 benchmarks are available.
 
 ### Scripts
 
@@ -386,12 +399,12 @@ The script:
 
 **Supported kernel ranges:**
 
-| Range | Patches applied | Notes |
-|---|---|---|
-| 7.0.x | `0001` + `0003` | Default target |
-| 6.18 – 6.19 | `0001` + `0003` | Same init_sched API as 7.x |
-| 6.12 – 6.17 | `0001` + `0002` | Older init_sched signature |
-| 5.18 – 6.11 | — | Not supported (different elevator op API) |
+| Range | Notes |
+|---|---|
+| 7.0.x | Default target — build source as-is |
+| 6.18 – 6.19 | Same init_sched API as 7.x — build source as-is |
+| 6.12 – 6.17 | Apply `0002` compat patch for older API signature |
+| 5.18 – 6.11 | Not supported (different elevator op API) |
 
 > [!TIP]
 > Re-running the script after a successful build skips download, extraction,
@@ -526,8 +539,11 @@ that shaped its design:
   pattern that BFQ pioneered for per-process scheduling state.
 - **[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)**
   — The lane-based priority classification, starvation-aware round counters,
-  budget refill mechanics, and hog containment model are direct adaptations of
-  the scx_flow CPU scheduler's design for the block layer.
+  budget refill mechanics, hog containment model, bounded signal helpers
+  (raise/decay geometric), latency credit/debt system, wake-profile-derived
+  IO profile, starvation quota mechanism, and the 3-mode autotuner with
+  step-wise parameter tuning are all direct adaptations of the scx_flow CPU
+  scheduler's design for the block layer.
 - **[mq-deadline](https://github.com/torvalds/linux/blob/master/block/mq-deadline.c)**
   — The merge-rbtree helpers (`former_request` / `next_request`) and the
   bio-merge callback pattern follow the conventions established by the
