@@ -1,5 +1,5 @@
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index dcf5f8c..5ed9f72 100644
+index dcf5f8c..da6d298 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
 @@ -287,7 +287,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
@@ -198,7 +198,7 @@ index dcf5f8c..5ed9f72 100644
 +				spin_unlock(&khd->lock);
 +				if (optype == FLOW_READ) rd_count++;
 +			}
- 			continue;
++			continue;
 +		}
 +		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write) {
 +			flow_remove_request(fd, rq, rq->q);
@@ -208,7 +208,7 @@ index dcf5f8c..5ed9f72 100644
 +				spin_unlock(&khd->lock);
 +				if (optype == FLOW_WRITE) wr_count++;
 +			}
-+			continue;
+ 			continue;
 +		}
  		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write)
  			continue;
@@ -266,20 +266,24 @@ index dcf5f8c..5ed9f72 100644
  	mempool_destroy(fd->rq_data_pool);
  	kmem_cache_destroy(fd->rq_data_cache);
  	kmem_cache_destroy(fd->dl_group_cache);
-@@ -961,8 +1048,11 @@ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+@@ -957,12 +1044,14 @@ static void flow_exit_sched(struct elevator_queue *e)
+ 
+ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+ {
+-	struct flow_data *fd = hctx->queue->elevator->elevator_data;
  	struct flow_hctx_data *khd;
  
  	khd = kzalloc_node(sizeof(*khd), GFP_KERNEL, hctx->numa_node);
 -	if (!khd)
 +	if (!khd) {
-+		pr_err("flow-iosched: init_hctx failed for hctx %u (node %d)\n",
++		pr_err("flow-iosched: init_hctx hctx-%u (node %d) failed\n",
 +		       hctx_idx, hctx->numa_node);
  		return -ENOMEM;
 +	}
  
  	spin_lock_init(&khd->lock);
  	INIT_LIST_HEAD(&khd->dispatch_list);
-@@ -980,7 +1070,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
+@@ -980,7 +1069,12 @@ static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
  	if (!khd)
  		return;
  
