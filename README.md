@@ -375,9 +375,12 @@ the scheduler overhead is measured while physical device latency is
 eliminated as a variable.
 
 For real hardware numbers (e.g. to publish IOPS or latency figures),
-point `DEVICE` at a dedicated physical block device with no mounted
-partitions.  The script auto-detects null_blk vs physical and skips the
-mounted-partition guard for null_blk.
+pass the device path as the first argument.  The script auto-detects
+null_blk vs physical and skips the mounted-partition guard for null_blk.
+
+The device can also be set via the `DEVICE` environment variable, but
+the positional argument is preferred — some sudo configurations strip
+environment variables.
 
 > [!NOTE]
 > Scheduler ranking (flow vs mq-deadline vs bfq) tends to be consistent
@@ -391,7 +394,10 @@ mounted-partition guard for null_blk.
 sudo ./bench-tests/run-benchmarks.sh
 
 # Real hardware: dedicated device with no mounted partitions
-DEVICE=/dev/nvme1n1 RUNTIME=60 sudo ./bench-tests/run-benchmarks.sh
+sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
+
+# Alternative: env var (may be stripped by sudo on some systems)
+RUNTIME=60 DEVICE=/dev/nvme1n1 sudo ./bench-tests/run-benchmarks.sh
 ```
 
 Workloads tested:
