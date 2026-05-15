@@ -289,7 +289,7 @@ functions carry lockdep annotations, and lock ordering (hctx lock → queue
 lock) is enforced to prevent deadlock across parallel dispatch contexts.
 The initial audit caught a scheduling bypass bug where requests were
 incorrectly added to a FIFO tracking list alongside the lane rbtree,
-bypassing the priority system entirely.  A follow-up audit in May 2026
+bypassing the priority system entirely.  A follow-up audit on 15 May 2026
 addressed seven additional issues found through structured review;
 the fixes are available in
 [`patches/0003`](https://github.com/galpt/flow-iosched/blob/main/patches/0003-linux7.0-flow-iosched-v1.1.0-fixes.patch).
