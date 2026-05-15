@@ -12,9 +12,9 @@
 #   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
 #
 # Supported kernel ranges:
-#   7.0.x         — applies 0001 patch only
-#   6.18 – 6.19   — applies 0001 patch only
-#   6.12 – 6.17   — applies 0001 + 0002 compat patch
+#   7.0.x         — applies 0001 + 0003 patch
+#   6.18 – 6.19   — applies 0001 + 0003 patch
+#   6.12 – 6.17   — applies 0001 + 0002 + 0003 patch
 #   5.18 – 6.11   — NOT supported (elevator op API differs)
 #
 # The script:
