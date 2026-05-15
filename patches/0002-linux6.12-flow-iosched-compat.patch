@@ -8,7 +8,11 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  block/flow-iosched.c | 17 +++++++++++++++--
  1 file changed, 15 insertions(+), 2 deletions(-)
 
-@@ -1330,10 +1330,11 @@
+diff --git a/block/flow-iosched.c b/block/flow-iosched.c
+index a32a463..fd321d0 100644
+--- a/block/flow-iosched.c
++++ b/block/flow-iosched.c
+@@ -1330,10 +1330,11 @@ reschedule:
  /* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
   * For kernels 6.12-6.17 (which pass elevator_type), apply
   * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
@@ -21,7 +25,7 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  
  	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
  	if (!fd) {
-@@ -1341,13 +1342,18 @@
+@@ -1341,13 +1342,18 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
  		return ret;
  	}
  
@@ -41,7 +45,7 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  	}
  
  	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-@@ -1432,6 +1438,8 @@
+@@ -1432,6 +1438,8 @@ destroy_rq_pool:
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
