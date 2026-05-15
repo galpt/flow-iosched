@@ -14,16 +14,16 @@ mechanism, per-hctx metrics, and a 3-mode autotuner.
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/Kconfig.iosched |   25 +
+ block/Kconfig.iosched |   31 +
  block/Makefile        |    1 +
  block/flow-iosched.c  | 1767 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 1793 insertions(+)
+ 3 files changed, 1799 insertions(+)
 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
 index 27f1132..4d227d8 100644
 --- a/block/Kconfig.iosched
 +++ b/block/Kconfig.iosched
-@@ -44,4 +44,29 @@ config BFQ_CGROUP_DEBUG
+@@ -44,4 +44,35 @@ config BFQ_CGROUP_DEBUG
  	Enable some debugging help. Currently it exports additional stat
  	files in a cgroup which can be useful for debugging.
  
