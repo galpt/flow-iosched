@@ -188,6 +188,16 @@ ax.set_ylabel("Read latency (µs)")
 ax.set_title("I/O Scheduler Comparison — Read Latency (lower is better)")
 ax.set_xticks(x + width * (len(schedulers) - 1) / 2)
 ax.set_xticklabels(wl_labels)
+# Annotate write-only workloads (no read latency to show)
+for wi, wl in enumerate(workloads):
+    all_zero = all(
+        row["read_iops"] == 0
+        for row in rows if row["workload"] == wl
+    )
+    if all_zero:
+        ax.text(x[wi] + width * len(schedulers) / 2, 0.08,
+                "write-only\n(no reads)", ha="center", va="bottom",
+                fontsize=6, color="gray", transform=ax.get_xaxis_transform())
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(schedulers), fontsize=7)
 ax.grid(axis="y", alpha=0.3)
 ax.set_yscale("log")
