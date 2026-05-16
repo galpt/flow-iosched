@@ -362,7 +362,7 @@ schedulers are useful: a scheduler that is slower on null_blk is doing more
 work per I/O — and that overhead matters on real hardware too.
 
 | Chart | What to look for |
-|---|---|---|
+|-------|-------------------|
 | ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** — higher is better.  The v3.0 simplification narrowed the read gap to kyber and mq-deadline compared to v2.0.  Writes remain slower, which is expected: writes pass through budget containment and deadline dispatch, while reads bypass both via the Read lane's FIFO path.  BFQ's per-process accounting keeps it at the bottom on this zero-latency device — a reminder that scheduling always costs something. |
 | ![Latency](benchmark-runs/null_blk/charts/latency.png) | **Read latency** — lower is better.  flow-iosched read latency is competitive with kyber and mq-deadline across all read-bearing workloads.  Write-only workloads naturally have no read latency bars. |
 | ![Per-workload IOPS](benchmark-runs/null_blk/charts/per_workload.png) | **Per-workload breakdown** — every workload sorted best-to-worst for that specific workload.  flow-iosched sits mid-pack on reads; writes trail the leaders, which is the honest picture of where the scheduler stands today on synthetic zero-latency media. |
@@ -383,7 +383,7 @@ These numbers reflect actual device I/O, including NVMe controller latency
 and PCIe transfer overhead.
 
 | Chart | What to look for |
-|---|---|
+|-------|-------------------|
 | ![IOPS](benchmark-runs/physical_device/charts/iops.png) | **Total IOPS** — the "none" scheduler leads on random reads (this drive reaches ~390k IOPS with zero scheduling overhead), but all full schedulers cluster tightly together.  flow-iosched is within a few percent of mq-deadline and kyber on every workload.  The headline: **flow-iosched's scheduling overhead does not cost you throughput on real storage.** |
 | ![Latency](benchmark-runs/physical_device/charts/latency.png) | **Read latency** — the NVMe controller's own latency dominates.  All schedulers cluster in the same band; flow-iosched is competitive with every other scheduler. |
 | ![Per-workload IOPS](benchmark-runs/physical_device/charts/per_workload.png) | **Per-workload breakdown** — the bars are nearly the same height across all schedulers for every workload.  The physical device, not the scheduler, is the performance ceiling. |
@@ -521,7 +521,7 @@ RUNTIME=60 sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
 Workloads tested:
 
 | Test | Block size | Queue depth | R/W mix | What it measures |
-|---|---|---|---|---|---|
+|------|------------|-------------|---------|-------------------|
 | Random read | 4 KiB | 32 | 100/0 | Read lane responsiveness |
 | Random write | 4 KiB | 32 | 0/100 | Write lane throughput |
 | Sequential read | 128 KiB | 8 | 100/0 | Bulk throughput (I/O-bound) |
@@ -623,7 +623,7 @@ What the script does:
 ### Test Environment
 
 | Component | Detail |
-|---|---|---|
+|-----------|--------|
 | CPU | AMD Ryzen 7 6800H (8 cores / 16 threads, 3.2 GHz base) |
 | Memory | 58 GB DDR5 |
 | NVMe drive 1 (boot/system) | INTEL SSDPEKNW512GZL (512 GB, 4 queues) |
