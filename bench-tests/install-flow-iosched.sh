@@ -12,7 +12,8 @@
 # downloads a matching kernel source for the private block-layer headers that
 # are not exported by distro kernel-headers packages, builds flow-iosched.ko,
 # installs it to /lib/modules/<uname -r>/extra/, and sets it as the default
-# I/O scheduler via a udev rule so it persists across reboots.
+# I/O scheduler via a systemd oneshot service + modules-load.d config so
+# it persists across reboots.
 #
 # Requirements: git, make, either gcc or clang, and internet access (to
 # download a kernel source tarball if headers are not found locally).

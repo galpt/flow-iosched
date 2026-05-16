@@ -80,12 +80,12 @@ Raised via bounded CAS on exhaustion."]
     H1["4. Per-hctx Dispatch
 
 flow_dispatch_request(hctx):
-Phase 1 (fast path): pops from
-khd->dispatch_list with only the
-per-hctx lock (no global contention).
-Phase 2 (slow path): refills from
-lane rbtrees under fd->lock, then
-appends to the dispatch list.
+Single-phase dispatch under fd->lock.
+Refills the per-hctx dispatch list
+from lane rbtrees, then pops from it.
+The old two-phase fast path (v2.0)
+was removed — it added complexity
+without measurable benefit.
 QUEUE_FLAG_SQ_SCHED is cleared."]
 
     I1["5. Device
@@ -103,13 +103,14 @@ no fd->lock). Secondary refill on idle
 > 100 ms. Budget < 0 raises containment
 score via bounded CAS (max 100).
 Score decays geometrically on each
-completion. Latency allowance raised
-on positive budget growth; latency
-pressure raised on containment."]
+completion. (The old latency credit/debt
+and IO profile fields were removed in
+v3.0 — lane assignment is now purely
+based on request flags and budget.)"]
 
     K1["Starvation & Quota Tracking
 
-Per-hctx starvation_rounds[5] array.
+Per-hctx starvation_rounds[4] array.
 When rounds >= starvation_max[lane],
 force-dispatch from that lane.
 Also: high_priority_burst_rounds counter.
@@ -117,7 +118,7 @@ When >= high_priority_quota_max (def 4),
 forces lower-lane dispatch even before
 starvation max is reached, then resets.
 Default starvation thresholds:
-Reserved = 5, Shared = 20, Contained = 30."]
+Read = 5, Write = 20, Contained = 30."]
 
     L1["ICQ Lifecycle
 
@@ -156,7 +157,7 @@ also lock-free for per-ICQ fields."]
     style N3 fill:#fff,stroke:#64748b,stroke-width:2,color:#1e293b
     style C1 fill:#fff,stroke:#dc2626,stroke-width:2,color:#1e293b
     style D1 fill:#fff,stroke:#2563eb,stroke-width:2,color:#1e293b
-    style F1 fill:#fff,stroke:#d97706,stroke-width:2,color:#1e293b
+    style F1 fill:#fff,stroke:#16a34a,stroke-width:2,color:#1e293b
     style G1 fill:#fff,stroke:#9333ea,stroke-width:2,color:#1e293b
     style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2,color:#1e293b
     style I1 fill:#fef2f2,stroke:#ef4444,stroke-width:2,color:#1e293b
@@ -608,15 +609,17 @@ What the script does:
    from `cdn.kernel.org`
 3. **Builds** `flow-iosched.ko` against the running kernel
 4. **Installs** to `/lib/modules/$(uname -r)/extra/` and runs `depmod -a`
-5. **Creates a udev rule** (`/etc/udev/rules.d/90-flow-iosched.rules`) that
-   selects flow-iosched for all NVMe, SATA, virtio, and MMC devices on boot
-6. **Loads** the module immediately (no reboot required)
+5. **Creates a systemd oneshot service** (`flow-iosched-scheduler@.service`)
+   that sets flow-iosched on each eligible block device after `local-fs.target`,
+   plus a `modules-load.d` config to load the module at boot
+6. **Loads** the module immediately and activates it on eligible devices
+   (no reboot required)
 7. **`--remove`** undoes all of the above: restores the previous scheduler,
-   unloads the module, removes the udev rule and the `.ko` file
+   unloads the module, removes the systemd service and `.ko` file
 
 > [!NOTE]
-> The udev rule selects flow-iosched for all eligible block devices at boot.
-> You can override per device at any time:
+> The systemd service selects flow-iosched for all eligible block devices at
+> boot.  You can override per device at any time:
 > ```bash
 > echo mq-deadline | sudo tee /sys/block/<device>/queue/scheduler
 > ```
@@ -629,7 +632,7 @@ What the script does:
 | Memory | 58 GB DDR5 |
 | NVMe drive 1 (boot/system) | INTEL SSDPEKNW512GZL (512 GB, 4 queues) |
 | NVMe drive 2 (benchmark target) | 512 GB NVMe (4 queues) |
-| Kernel | 7.0.5-2-cachyos, PREEMPT_DYNAMIC |
+| Kernel | 7.0.8-1-cachyos, PREEMPT_DYNAMIC |
 | Platform | CachyOS Linux |
 | Available schedulers | `none`, `mq-deadline`, `kyber`, `bfq`, `adios`, `flow-iosched` |
 
