@@ -8,22 +8,21 @@ CPU scheduler.
 > [!NOTE]
 > flow-iosched targets the same audience as its CPU-side inspiration: general-purpose
 > desktop and workstation machines where responsiveness and throughput both matter.
-> Version 2.0.1 brings the I/O scheduler up to parity with scx_flow's lane architecture
-> including proportional budget refill, bounded signal decay, latency credit/debt
-> tracking, per-process IO profiles, a starvation quota mechanism, and a 3-mode
-> autotuner that eliminates the need for manual tuning.
+> Version 3.0 simplifies the lane model from five lanes to four (Emergency / Read /
+> Write / Contained), removes the scx_flow-derived IO profile recomputation and
+> latency credit/debt system, and applies structural data-safety fixes across the
+> dispatch, completion, and teardown paths.
 
 ## Overview
 
 | Lane | Target I/O | Slice / Window | Behaviour |
 |------|------------|----------------|-----------|
 | Emergency | `BLK_MQ_INSERT_AT_HEAD` | Immediate | Bypasses all scheduling |
-| Reserved | Synchronous reads, metadata | configurable (default 2048 sectors) | Low-latency path for interactive I/O |
-| Latency | Small random I/O | Short batch window | Bounded responsiveness |
-| Shared | Async writes, best-effort | Configurable batch limit | Background throughput |
+| Read | Synchronous reads, metadata, small writes | configurable (default 2048 sectors) | Low-latency path for interactive I/O |
+| Write | Async writes, best-effort | Configurable batch limit | Background throughput |
 | Contained | Hog-throttled processes | Reduced dispatch rate | Limits I/O-bound interference |
 
-Dispatch priority: Emergency > Reserved > Latency > Shared > Contained.
+Dispatch priority: Emergency > Read > Write > Contained.
 Starvation counters rotate CPU-intensive I/O flows back into higher lanes so no
 lane is abandoned entirely.
 
@@ -41,16 +40,16 @@ flow_rq_data struct from the mempool."]
 
 flow_assign_lane() inspects the request's
 cmd_flags (sync, meta, flush, priority),
-is_write, blk_rq_bytes, the per-process
-budget, and insert_flags (AT_HEAD).
-Returns a lane number (1-5) and deadline."]
+is_write, blk_rq_bytes, and insert_flags
+(AT_HEAD). Returns a lane (1-3) and
+deadline. No IO profile recomputation."]
 
-    N3["3. Five Priority Lanes
+    N3["3. Four Priority Lanes
 
 Dispatch walks lanes in priority order:
-Emergency > Reserved > Latency > Shared
-> Contained. Each lane has its own
-deadline-sorted rbtree (rb_root_cached)."]
+Emergency > Read > Write > Contained.
+Each lane has its own deadline-sorted
+rbtree (rb_root_cached)."]
 
     C1["Emergency
 
@@ -58,20 +57,14 @@ BLK_MQ_INSERT_AT_HEAD bypass.
 Queued in prio_queue[0] for immediate,
 unconditional dispatch. No rbtree."]
 
-    D1["Reserved
+    D1["Read
 
-Synchronous reads, REQ_META, and
-REQ_PRIO. Budget: 2048 sectors.
-Deadline = start_time_ns (FIFO order)."]
+Synchronous reads, REQ_META, REQ_PRIO,
+and small writes ≤ 4 KB. Budget: 2048
+sectors. FIFO for reads, short deadline
+window (2 ms) for small writes."]
 
-    E1["Latency
-
-REQ_SYNC writes and small I/O <= 4 KB.
-Deadline = start_time_ns + 2 ms.
-Budget refills on completion
-(sectors/100) or idle > 100 ms."]
-
-    F1["Shared
+    F1["Write
 
 Async writes and best-effort I/O.
 Budget: 512 sectors. Async depth
@@ -141,12 +134,10 @@ also lock-free for per-ICQ fields."]
     B1 --> N3
     N3 --> C1
     N3 --> D1
-    N3 --> E1
     N3 --> F1
     N3 --> G1
     C1 --> H1
     D1 --> H1
-    E1 --> H1
     F1 --> H1
     G1 --> H1
     H1 --> I1
@@ -155,7 +146,6 @@ also lock-free for per-ICQ fields."]
     J1 -.-> G1
     C1 -.-> K1
     D1 -.-> K1
-    E1 -.-> K1
     F1 -.-> K1
     G1 -.-> K1
     K1 -.-> H1
@@ -166,7 +156,6 @@ also lock-free for per-ICQ fields."]
     style N3 fill:#fff,stroke:#64748b,stroke-width:2,color:#1e293b
     style C1 fill:#fff,stroke:#dc2626,stroke-width:2,color:#1e293b
     style D1 fill:#fff,stroke:#2563eb,stroke-width:2,color:#1e293b
-    style E1 fill:#fff,stroke:#16a34a,stroke-width:2,color:#1e293b
     style F1 fill:#fff,stroke:#d97706,stroke-width:2,color:#1e293b
     style G1 fill:#fff,stroke:#9333ea,stroke-width:2,color:#1e293b
     style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2,color:#1e293b
@@ -177,34 +166,30 @@ also lock-free for per-ICQ fields."]
 ```
 
 Each request is classified into a lane at insertion time based on its
-`cmd_flags` (sync, meta, flush, priority), the originating process's I/O
-budget balance, and the per-process IO profile (computed from recent budget
-and latency signal history).  Per-lane deadline-sorted red-black trees (plus
-two FIFO priority queues for the barrier tiers) are the primary scheduling
-state.
+`cmd_flags` (sync, meta, flush, priority) and size.  Per-lane deadline-
+sorted red-black trees (plus two FIFO priority queues for the barrier
+tiers) are the primary scheduling state.  The old scx_flow-derived IO
+profile recomputation and latency credit/debt system have been removed
+in v3.0 — lane assignment is purely based on request flags and budget
+containment.
 
-Dispatch uses a per-hardware-context fast-path: each hardware context
-maintains its own dispatch list, starvation counters, and a
-high-priority-burst quota counter.  The dispatcher first attempts a
-lock-free pop from the per-hctx dispatch list; if empty, it walks the
-global lane trees under a short-lived lock to refill the list.  This allows
-independent dispatch across multiple hardware queues while preserving the
-lane priority order.  Starvation is tracked as round counters per lane and
-as burst-quota rounds: when a lane accumulates enough consecutive bypasses
-the scheduler force-dispatches from it; when high-priority bursts exceed the
-quota threshold, lower lanes are served preemptively.
+Dispatch uses a single-phase model under the global scheduler lock:
+each hardware context fills its dispatch list from the deadline rbtrees,
+then pops from it.  Starvation is tracked as round counters per lane
+and as burst-quota rounds: when a lane accumulates enough consecutive
+bypasses, the scheduler force-dispatches from it; when high-priority
+bursts exceed the quota threshold, lower lanes are served preemptively.
 
-All per-process scheduling state (budget, containment score, latency
-allowance, latency pressure, IO profile) uses atomic operations and is
-accessed without the global lock.  The I/O completion path updates these
-fields lock-free, making the primary budget refill mechanism (proportional
-refill of completed_sectors / 100 on each completion) contention-free.
+Per-process budget and containment state uses atomic operations and is
+accessed without the global lock.  The I/O completion path refills the
+budget lock-free (proportional refill of completed_sectors / 100 on each
+completion).  Containment scores decay geometrically on each completion.
 
 A 3-mode autotuner (Balanced / Latency / Throughput) runs every second.
-It aggregates per-hctx dispatch metrics, computes workload ratios
-(latency, rescue, contained, shared), and adjusts batch sizes and starvation
-thresholds toward the mode target using step-wise parameter tuning ported
-from scx_flow.  No sysfs intervention is needed for common workloads.
+It aggregates per-hctx dispatch metrics, computes workload ratios (read,
+write, rescue, contained), and adjusts batch sizes and starvation
+thresholds toward the mode target.  No sysfs intervention is needed for
+common workloads.
 
 > [!TIP]
 > For a deeper walkthrough of the lane classification, budget refill mechanics,
@@ -217,14 +202,13 @@ from scx_flow.  No sysfs intervention is needed for common workloads.
 |---|---|
 | 7.0.x (CachyOS) | Default target — the source as-is targets this API. |
 | 6.18 – 6.19 | Same init_sched API as 7.x — compatible as-is. |
-| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply the existing `patches/0002-linux6.12-flow-iosched-compat.patch` for API compatibility, then build from the v2.0.1 source. |
+| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply the existing `patches/0002-linux6.12-flow-iosched-compat.patch` for API compatibility, then build from the v3.0 source. |
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
 > [!IMPORTANT]
-> The `patches/` directory ships `0001-linux7.0-flow-iosched-v2.0.1.patch`
+> The `patches/` directory ships `0001-linux7.0-flow-iosched-v3.0.patch`
 > for kernel 7.0.x / 6.18+ and `0002-linux6.12-flow-iosched-compat.patch`
 > for kernels 6.12–6.17.  Apply 0001 first, then 0002 for 6.12–6.17.
-> The old v1.1.0 patches have been removed — v2.0.1 subsumes all fixes.
 
 ### Standalone Module Build (Recommended)
 
@@ -265,10 +249,9 @@ config MQ_IOSCHED_FLOW
     tristate "Multi-Lane I/O scheduler (FLOW)"
     default m
     help
-      Multi-lane I/O scheduler adapted from scx_flow. Provides five
-      priority tiers with deadline-sorted dispatch, per-process budget
-      containment with completion-based refill, lock-free atomics,
-      geometric signal decay, IO profiles, starvation quota, and
+      Multi-lane I/O scheduler with four priority tiers (Emergency,
+      Read, Write, Contained), deadline-sorted rbtree dispatch, per-
+      process budget containment with completion-based refill, and a
       3-mode autotuner.
 
 // Makefile (in block/Makefile):
@@ -299,15 +282,15 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `flow_version` | RO | — | Current scheduler version (2.0.1) |
+| `flow_version` | RO | — | Current scheduler version (3.0) |
 | `read_priority` | RW | 0 | Read bias vs writes at same deadline (-20 to 19) |
-| `sync_budget_sectors` | RW | 2048 | Reserved lane budget per sync dispatch |
-| `async_budget_sectors` | RW | 512 | Shared lane budget per async dispatch |
+| `sync_budget_sectors` | RW | 2048 | Read lane budget per sync dispatch |
+| `async_budget_sectors` | RW | 512 | Write lane budget per async dispatch |
 | `batch_max_read` | RW | 16 | Max read requests per batch (adjusted by autotune) |
 | `batch_max_write` | RW | 16 | Max write requests per batch |
 | `completion_window_ns` | RW | 8000000 | Dispatch batch window (nanoseconds) |
-| `starvation_max_reserved` | RW | 5 | Reserved starvation rounds before forced rotation |
-| `starvation_max_shared` | RW | 20 | Shared starvation rounds before forced dispatch |
+| `starvation_max_read` | RW | 5 | Read starvation rounds before forced rotation |
+| `starvation_max_write` | RW | 20 | Write starvation rounds before forced dispatch |
 | `starvation_max_contained` | RW | 30 | Contained starvation rounds before rescue |
 | `contain_threshold` | RW | 100 | Hog containment activation score |
 
@@ -336,7 +319,7 @@ The code has been audited for memory safety, request lifecycle correctness,
 lock ordering, integer safety, and error-path robustness.  All internal
 functions carry lockdep annotations, and lock ordering (hctx lock → queue
 lock) is enforced to prevent deadlock across parallel dispatch contexts.
-Version 2.0.1 underwent a structured review that caught a CAS retry-loop
+Version 3.0 underwent a structured review that caught a CAS retry-loop
 livelock in the atomic helper functions (fixed during review), verified all
 per-ICQ fields use correct atomic_t/atomic64_t access with memory barriers,
 confirmed lock ordering in the dispatch path, and audited the autotune timer
@@ -349,7 +332,9 @@ the primary contention point between multi-queue dispatch and completion.
 > hardware context.  This avoids the single-queue dispatch bottleneck that
 > restricts throughput on high-end NVMe with 16 or more queues — a framework
 > constraint that some other blk-mq schedulers (mq-deadline, BFQ) still
-> inherit by using single-queue dispatch mode.
+> inherit by using single-queue dispatch mode.  The per-hctx dispatch-list
+> fast path from v2.0 was removed in v3.0 after analysis showed it added
+> complexity without measurable benefit on real hardware.
 
 ## Benchmarks
 
@@ -666,11 +651,12 @@ that shaped its design:
   pattern that BFQ pioneered for per-process scheduling state.
 - **[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)**
   — The lane-based priority classification, starvation-aware round counters,
-  budget refill mechanics, hog containment model, bounded signal helpers
-  (raise/decay geometric), latency credit/debt system, wake-profile-derived
-  IO profile, starvation quota mechanism, and the 3-mode autotuner with
-  step-wise parameter tuning are all direct adaptations of the scx_flow CPU
-  scheduler's design for the block layer.
+  budget refill mechanics, hog containment model, starvation quota mechanism,
+  and the 3-mode autotuner with step-wise parameter tuning were originally
+  adapted from the scx_flow CPU scheduler.  Version 3.0 removed the
+  scx_flow-derived IO profile recomputation, latency credit/debt system, and
+  per-hctx dispatch-list fast path — none of which added measurable benefit
+  over the simpler block-I/O-native design.
 - **[mq-deadline](https://github.com/torvalds/linux/blob/master/block/mq-deadline.c)**
   — The merge-rbtree helpers (`former_request` / `next_request`) and the
   bio-merge callback pattern follow the conventions established by the
