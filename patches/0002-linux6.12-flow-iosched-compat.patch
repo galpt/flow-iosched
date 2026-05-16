@@ -1,7 +1,7 @@
 From 5ac97817a713469e3644821cab8ae5553e54589e Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
 Date: Thu, 14 May 2026 20:18:06 +0700
-Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v2.0.0)
+Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v2.0.1)
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
@@ -12,7 +12,7 @@ diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 index 6877056..5bd83a6 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -1344,10 +1344,11 @@ reschedule:
+@@ -1361,10 +1361,11 @@
  /* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
   * For kernels 6.12-6.17 (which pass elevator_type), apply
   * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
@@ -22,13 +22,13 @@ index 6877056..5bd83a6 100644
  	struct flow_data *fd;
  	int ret = -ENOMEM;
 +	struct elevator_queue *eq;
- 
+
  	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
  	if (!fd) {
-@@ -1355,13 +1356,18 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+@@ -1372,13 +1373,18 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
  		return ret;
  	}
- 
+
 +	eq = elevator_alloc(q, e);
 +	if (!eq) {
 +		pr_err("flow-iosched: failed to allocate elevator\n");
@@ -43,9 +43,9 @@ index 6877056..5bd83a6 100644
 -		goto free_fd;
 +		goto out_put_eq;
  	}
- 
+
  	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-@@ -1446,6 +1452,8 @@ destroy_rq_pool:
+@@ -1462,6 +1468,8 @@ destroy_rq_pool:
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);

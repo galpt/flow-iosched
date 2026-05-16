@@ -8,7 +8,7 @@ CPU scheduler.
 > [!NOTE]
 > flow-iosched targets the same audience as its CPU-side inspiration: general-purpose
 > desktop and workstation machines where responsiveness and throughput both matter.
-> Version 2.0.0 brings the I/O scheduler up to parity with scx_flow's lane architecture
+> Version 2.0.1 brings the I/O scheduler up to parity with scx_flow's lane architecture
 > including proportional budget refill, bounded signal decay, latency credit/debt
 > tracking, per-process IO profiles, a starvation quota mechanism, and a 3-mode
 > autotuner that eliminates the need for manual tuning.
@@ -217,14 +217,14 @@ from scx_flow.  No sysfs intervention is needed for common workloads.
 |---|---|
 | 7.0.x (CachyOS) | Default target — the source as-is targets this API. |
 | 6.18 – 6.19 | Same init_sched API as 7.x — compatible as-is. |
-| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply the existing `patches/0002-linux6.12-flow-iosched-compat.patch` for API compatibility, then build from the v2.0.0 source. |
+| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply the existing `patches/0002-linux6.12-flow-iosched-compat.patch` for API compatibility, then build from the v2.0.1 source. |
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
 > [!IMPORTANT]
-> The `patches/` directory ships `0001-linux7.0-flow-iosched-v2.0.0.patch`
+> The `patches/` directory ships `0001-linux7.0-flow-iosched-v2.0.1.patch`
 > for kernel 7.0.x / 6.18+ and `0002-linux6.12-flow-iosched-compat.patch`
 > for kernels 6.12–6.17.  Apply 0001 first, then 0002 for 6.12–6.17.
-> The old v1.1.0 patches have been removed — v2.0.0 subsumes all fixes.
+> The old v1.1.0 patches have been removed — v2.0.1 subsumes all fixes.
 
 ### Standalone Module Build (Recommended)
 
@@ -299,7 +299,7 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `flow_version` | RO | — | Current scheduler version (2.0.0) |
+| `flow_version` | RO | — | Current scheduler version (2.0.1) |
 | `read_priority` | RW | 0 | Read bias vs writes at same deadline (-20 to 19) |
 | `sync_budget_sectors` | RW | 2048 | Reserved lane budget per sync dispatch |
 | `async_budget_sectors` | RW | 512 | Shared lane budget per async dispatch |
@@ -336,11 +336,11 @@ The code has been audited for memory safety, request lifecycle correctness,
 lock ordering, integer safety, and error-path robustness.  All internal
 functions carry lockdep annotations, and lock ordering (hctx lock → queue
 lock) is enforced to prevent deadlock across parallel dispatch contexts.
-Version 2.0.0 underwent a structured review that caught a CAS retry-loop
+Version 2.0.1 underwent a structured review that caught a CAS retry-loop
 livelock in the atomic helper functions (fixed during review), verified all
 per-ICQ fields use correct atomic_t/atomic64_t access with memory barriers,
 confirmed lock ordering in the dispatch path, and audited the autotune timer
-for proper teardown via del_timer_sync.  All per-process scheduling state is
+for proper teardown via timer_shutdown_sync.  All per-process scheduling state is
 now accessed without the global fd->lock on the completion path, eliminating
 the primary contention point between multi-queue dispatch and completion.
 

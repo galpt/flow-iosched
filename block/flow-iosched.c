@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Multi-Lane I/O Scheduler (FLOW) — v2.0.0
+ * Multi-Lane I/O Scheduler (FLOW) — v2.0.1
  *
  * A multi-lane I/O scheduler adapted from the scx_flow CPU scheduling design.
  * Five priority tiers, deadline-sorted rbtree dispatch, per-process budget
@@ -38,23 +38,19 @@
 #include <linux/version.h>
 
 /*
- * Kernel 6.15 renamed del_timer_sync() to timer_delete_sync().
- * Kernels >= 6.15 only have timer_delete_sync; older kernels (6.12-6.14)
- * only have del_timer_sync.  We use del_timer_sync in the source and
- * provide a compat define for newer kernels.
- *
- * The 0002 compat patch (6.12-6.17) adds extra handling for the
- * older init_sched API; the timer API boundary at 6.15 is orthogonal.
+ * Use timer_shutdown_sync() instead of del_timer_sync() to prevent
+ * the autotune timer handler from re-arming itself after shutdown.
+ * timer_shutdown_sync() is available since Linux 5.18 and prevents
+ * any subsequent mod_timer() from re-arming the timer — critical for
+ * safe teardown in exit_sched.
+ * All supported kernel versions (6.12+) have timer_shutdown_sync.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
-#define del_timer_sync timer_delete_sync
-#endif
 
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 
-#define FLOW_VERSION "2.0.0"
+#define FLOW_VERSION "2.0.1"
 
 /* ── Autotune modes ──────────────────────────────────────────────── */
 #define FLOW_AUTOTUNE_BALANCED		0U
@@ -118,6 +114,9 @@ enum flow_optype {
 /* ── Autotune defaults ───────────────────────────────────────────── */
 #define FLOW_AUTOTUNE_INTERVAL_HZ		1U
 
+/* ── CAS retry limit ─────────────────────────────────────────────── */
+#define FLOW_ATOMIC_RETRY_MAX			256U
+
 /* ── IO profile bits (adapted from scx_flow wake_profile) ────────── */
 enum flow_io_profile {
 	IO_PROFILE_POSITIVE_BUDGET	= 1U << 0,
@@ -173,9 +172,9 @@ struct flow_data {
 	/* Sector-sorted merge rbtree (uses rq->rb_node) */
 	struct rb_root_cached	merge_root;
 
-	/* Budget defaults */
-	s32			sync_budget_sectors;
-	s32			async_budget_sectors;
+	/* Budget defaults (atomic — reads may race with sysfs writes) */
+	atomic_t		sync_budget_sectors;
+	atomic_t		async_budget_sectors;
 
 	/* Containment */
 	u32			contain_threshold;
@@ -336,8 +335,16 @@ static inline u32 flow_decay_confidence(u32 signal, u32 delta, u32 shift)
 static inline u32 flow_raise_bounded_atomic(atomic_t *v, u32 delta, u32 sig_max)
 {
 	u32 old, new;
+	unsigned int retries = 0;
 
 	do {
+		if (unlikely(++retries > FLOW_ATOMIC_RETRY_MAX)) {
+			WARN_ONCE(1, "flow-iosched: raise_bounded_atomic retry exceeded\n");
+			old = atomic_read(v);
+			new = flow_raise_bounded(old, delta, sig_max);
+			atomic_set(v, new);
+			return new;
+		}
 		old = atomic_read(v);
 		new = flow_raise_bounded(old, delta, sig_max);
 	} while (atomic_cmpxchg(v, old, new) != old);
@@ -347,8 +354,16 @@ static inline u32 flow_raise_bounded_atomic(atomic_t *v, u32 delta, u32 sig_max)
 static inline u32 flow_decay_geometric_atomic(atomic_t *v, u32 shift)
 {
 	u32 old, new;
+	unsigned int retries = 0;
 
 	do {
+		if (unlikely(++retries > FLOW_ATOMIC_RETRY_MAX)) {
+			WARN_ONCE(1, "flow-iosched: decay_geometric_atomic retry exceeded\n");
+			old = atomic_read(v);
+			new = flow_decay_geometric(old, shift);
+			atomic_set(v, new);
+			return new;
+		}
 		old = atomic_read(v);
 		new = flow_decay_geometric(old, shift);
 	} while (atomic_cmpxchg(v, old, new) != old);
@@ -457,7 +472,8 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 
 	/* Get per-process budget, keyed by sync vs async */
 	budget = (rq->cmd_flags & REQ_SYNC) ?
-		  fd->sync_budget_sectors : fd->async_budget_sectors;
+		  atomic_read(&fd->sync_budget_sectors) :
+		  atomic_read(&fd->async_budget_sectors);
 
 	/* Clamp budget to safe range */
 	if (budget < 64)
@@ -976,26 +992,26 @@ dispatch_rd:
 		rq = rd->rq;
 		u8 optype = flow_optype(rq);
 
-		/* Enforce per-hctx batch limits — remove and reinsert to advance cursor */
+		/*
+		 * Enforce per-hctx batch limits by tracking read/write counts.
+		 * When a batch limit is exceeded, skip past the excess request
+		 * in the rbtree by advancing to the next dl_group node, then
+		 * continue the loop. The request is NOT removed from the rbtree —
+		 * it stays in place and will be dispatched on the next dispatch
+		 * cycle when counters reset. This avoids the starvation bug
+		 * caused by re-inserting with a later deadline (old behaviour).
+		 */
 		if (optype == FLOW_READ && rd_count >= fd->batch_max_read) {
-			flow_remove_request(fd, rq, rq->q);
-			if (!flow_add_to_dl_tree(fd, lane, rq)) {
-				spin_lock(&khd->lock);
-				list_add_tail(&rq->queuelist, &khd->dispatch_list);
-				spin_unlock(&khd->lock);
-				if (optype == FLOW_READ) rd_count++;
-			}
-			continue;
+			struct rb_node *next = rb_next(&rd->dl_group->node);
+			if (next)
+				continue;
+			break;
 		}
 		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write) {
-			flow_remove_request(fd, rq, rq->q);
-			if (!flow_add_to_dl_tree(fd, lane, rq)) {
-				spin_lock(&khd->lock);
-				list_add_tail(&rq->queuelist, &khd->dispatch_list);
-				spin_unlock(&khd->lock);
-				if (optype == FLOW_WRITE) wr_count++;
-			}
-			continue;
+			struct rb_node *next = rb_next(&rd->dl_group->node);
+			if (next)
+				continue;
+			break;
 		}
 
 		flow_remove_request(fd, rq, rq->q);
@@ -1118,7 +1134,8 @@ static void flow_completed_request(struct request *rq, u64 now)
 	if (refill > 0) {
 		struct flow_data *fd = rq->q->elevator->elevator_data;
 		s64 budget = (rq->cmd_flags & REQ_SYNC) ?
-			     fd->sync_budget_sectors : fd->async_budget_sectors;
+			     atomic_read(&fd->sync_budget_sectors) :
+			     atomic_read(&fd->async_budget_sectors);
 		if (budget < 64) budget = 64;
 		s64 new_budget = atomic64_add_return(refill, &ficq->io_budget_sectors);
 		s64 cap = budget * 4;
@@ -1391,8 +1408,8 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 	fd->merge_root		= RB_ROOT_CACHED;
 
 	/* Budget defaults */
-	fd->sync_budget_sectors		= FLOW_BUDGET_SECTORS_DEFAULT_SYNC;
-	fd->async_budget_sectors	= FLOW_BUDGET_SECTORS_DEFAULT_ASYNC;
+	atomic_set(&fd->sync_budget_sectors, FLOW_BUDGET_SECTORS_DEFAULT_SYNC);
+	atomic_set(&fd->async_budget_sectors, FLOW_BUDGET_SECTORS_DEFAULT_ASYNC);
 
 	/* Containment defaults */
 	fd->contain_threshold		= FLOW_CONTAIN_THRESHOLD_DEFAULT;
@@ -1456,7 +1473,7 @@ static void flow_exit_sched(struct elevator_queue *e)
 	struct flow_data *fd = e->elevator_data;
 
 	/* Delete autotune timer before draining scheduler state */
-	del_timer_sync(&fd->autotune_timer);
+	timer_shutdown_sync(&fd->autotune_timer);
 
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
 	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
@@ -1664,8 +1681,51 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 	return count;								\
 }
 
-FLOW_SYSFS_S32_RW(sync_budget_sectors)
-FLOW_SYSFS_S32_RW(async_budget_sectors)
+/* Custom show/store for atomic_t budget fields (can't use FLOW_SYSFS_S32_RW) */
+static ssize_t flow_sync_budget_sectors_show(struct elevator_queue *e, char *page)
+{
+	struct flow_data *fd = e->elevator_data;
+	guard(spinlock_irqsave)(&fd->lock);
+	return sprintf(page, "%d\n", atomic_read(&fd->sync_budget_sectors));
+}
+
+static ssize_t flow_sync_budget_sectors_store(struct elevator_queue *e,
+					      const char *page, size_t count)
+{
+	struct flow_data *fd = e->elevator_data;
+	int val;
+	int ret;
+
+	ret = kstrtoint(page, 10, &val);
+	if (ret || val < 0)
+		return -EINVAL;
+	guard(spinlock_irqsave)(&fd->lock);
+	atomic_set(&fd->sync_budget_sectors, val);
+	return count;
+}
+
+static ssize_t flow_async_budget_sectors_show(struct elevator_queue *e, char *page)
+{
+	struct flow_data *fd = e->elevator_data;
+	guard(spinlock_irqsave)(&fd->lock);
+	return sprintf(page, "%d\n", atomic_read(&fd->async_budget_sectors));
+}
+
+static ssize_t flow_async_budget_sectors_store(struct elevator_queue *e,
+					       const char *page, size_t count)
+{
+	struct flow_data *fd = e->elevator_data;
+	int val;
+	int ret;
+
+	ret = kstrtoint(page, 10, &val);
+	if (ret || val < 0)
+		return -EINVAL;
+	guard(spinlock_irqsave)(&fd->lock);
+	atomic_set(&fd->async_budget_sectors, val);
+	return count;
+}
+
 FLOW_SYSFS_U16_RW(batch_max_read)
 FLOW_SYSFS_U16_RW(batch_max_write)
 FLOW_SYSFS_U64_RW(completion_window_ns)

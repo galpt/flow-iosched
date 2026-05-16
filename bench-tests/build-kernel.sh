@@ -12,9 +12,9 @@
 #   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
 #
 # Supported kernel ranges:
-#   7.0.x         — applies 0001 (v2.0.0) patch
-#   6.18 – 6.19   — applies 0001 (v2.0.0) patch
-#   6.12 – 6.17   — applies 0001 (v2.0.0) + 0002 compat patches
+#   7.0.x         — applies 0001 (v2.0.1) patch
+#   6.18 – 6.19   — applies 0001 (v2.0.1) patch
+#   6.12 – 6.17   — applies 0001 (v2.0.1) + 0002 compat patches
 #   5.18 – 6.11   — NOT supported (elevator op API differs)
 #
 # The script:
@@ -343,8 +343,8 @@ apply_patches() {
     local patches_to_apply=()
 
     # 0001 is always applied for all supported versions
-    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v2.0.0.patch" ]; then
-        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v2.0.0.patch")
+    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v2.0.1.patch" ]; then
+        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v2.0.1.patch")
     else
         # Fallback: try to match any 0001 patch (user may have renamed it)
         local fallback
@@ -352,7 +352,7 @@ apply_patches() {
         if [ -n "$fallback" ]; then
             patches_to_apply+=("$fallback")
         else
-            die "0001 patch not found in $patch_dir — expected 0001-linux7.0-flow-iosched-v2.0.0.patch"
+            die "0001 patch not found in $patch_dir — expected 0001-linux7.0-flow-iosched-v2.0.1.patch"
         fi
     fi
 
