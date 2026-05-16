@@ -2,3 +2,5 @@ device=/dev/nvme1n1p1
 label=/dev/nvme1n1p1
 runtime=30
 null_blk=false
+kernel=7.0.8-1-cachyos
+build=standalone module (install-flow-iosched.sh)

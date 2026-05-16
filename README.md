@@ -390,10 +390,11 @@ and PCIe transfer overhead.
 | ![Consolidated averages](benchmark-runs/physical_device/charts/comparison.png) | **Averages across all workloads** — the spread visible on null_blk has collapsed.  Read IOPS, write IOPS, and latencies are all within a narrow band across schedulers.  This is the most important chart in this section: it shows that **flow-iosched's lane-based scheduling does not penalise you on real hardware.** |
 
 > [!NOTE]
-> These runs use the v3.0 flow-iosched on kernel `7.0.5-flow` built with
-> `CONFIG_MQ_IOSCHED_FLOW=y`, booted on the CachyOS host system.  The
-> `null_blk` charts were measured first, then the physical device — both
-> on the same boot session to minimise variation.
+> These runs use the v3.0 flow-iosched module built against and loaded on
+> the stock CachyOS kernel (`7.0.8-1-cachyos`) via the standalone module
+> install script (`install-flow-iosched.sh`).  The `null_blk` charts were
+> measured first, then the physical device — both on the same boot session
+> to minimise variation.
 
 #### What this means for you
 
