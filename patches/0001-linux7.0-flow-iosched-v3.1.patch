@@ -1,5 +1,5 @@
---- a/block/Kconfig.iosched	2026-05-17 18:19:03.963206343 +0700
-+++ b/block/Kconfig.iosched	2026-05-17 18:45:48.173602974 +0700
+--- a/block/Kconfig.iosched	2026-05-17 18:47:36.348282283 +0700
++++ b/block/Kconfig.iosched	2026-05-17 18:49:41.049930539 +0700
 @@ -81,4 +81,41 @@
  	  patch.  For most users, the standalone module install script
  	  (install-flow-iosched.sh) is the recommended approach.
@@ -43,12 +43,12 @@
 +
  endmenu
 
---- a/block/Makefile	2026-05-17 18:19:03.963312032 +0700
-+++ b/block/Makefile	2026-05-17 18:45:48.175500504 +0700
-@@ -23,6 +23,7 @@
+--- a/block/Makefile	2026-05-15 19:53:54.000000000 +0700
++++ b/block/Makefile	2026-05-17 18:49:41.049984601 +0700
+@@ -22,6 +22,7 @@
+ obj-$(CONFIG_BLK_CGROUP_IOCOST)	+= blk-iocost.o
  obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
  obj-$(CONFIG_MQ_IOSCHED_KYBER)	+= kyber-iosched.o
- obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
  bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
  obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
