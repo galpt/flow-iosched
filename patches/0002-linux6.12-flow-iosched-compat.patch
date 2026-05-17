@@ -1,18 +1,15 @@
-From 5ac97817a713469e3644821cab8ae5553e54589e Mon Sep 17 00:00:00 2001
+From c17c92e74c3c795dded93dc1df187835672d97f6 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
 Date: Thu, 14 May 2026 20:18:06 +0700
 Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.0)
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/flow-iosched.c | 24 ++++++++++++++++++++----
- 1 file changed, 20 insertions(+), 4 deletions(-)
+ block/flow-iosched.c | 29 ++++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index fa0c9f4..a9510dc 100644
---- a/block/flow-iosched.c
-+++ b/block/flow-iosched.c
-@@ -1310,10 +1310,11 @@
+@@ -1310,10 +1310,11 @@ reschedule:
   * For kernels 6.12-6.17 (which pass elevator_type), apply
   * patches/0002-linux6.12-flow-iosched-compat.patch after this one.
   */
@@ -22,33 +19,10 @@ index fa0c9f4..a9510dc 100644
  	struct flow_data *fd;
  	int ret = -ENOMEM;
 +	struct elevator_queue *eq;
-
+ 
  	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
  	if (!fd) {
-@@ -1321,6 +1322,13 @@
- 		return ret;
- 	}
-
-+	eq = elevator_alloc(q, e);
-+	if (!eq) {
-+		pr_err("flow-iosched: failed to allocate elevator\n");
-+		return -ENOMEM;
-+	}
-+
-+
- 	/* Create memory pools */
- 	fd->rq_data_cache = kmem_cache_create("flow_rq_data",
- 					      sizeof(struct flow_rq_data),
-@@ -1328,7 +1336,7 @@
- 					      0, SLAB_HWCACHE_ALIGN, NULL);
- 	if (!fd->rq_data_cache) {
- 		pr_err("flow-iosched: failed to create rq_data cache\n");
--		goto free_fd;
-+		goto out_put_eq;
- 	}
-
- 	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-@@ -1418,6 +1426,8 @@
+@@ -1420,6 +1421,8 @@ destroy_rq_pool:
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
@@ -57,5 +31,3 @@ index fa0c9f4..a9510dc 100644
  free_fd:
  	kfree(fd);
  	return ret;
--- 
-2.54.0

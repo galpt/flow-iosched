@@ -1,4 +1,4 @@
-From c9cc0e5d59e618dbc15951d23dd4bf89ae4db5d2 Mon Sep 17 00:00:00 2001
+From c17c92e74c3c795dded93dc1df187835672d97f6 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
 Date: Sat, 16 May 2026 23:49:48 +0700
 Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v3.0
@@ -65,7 +65,7 @@ index c65f4da..bc27a56 100644
  				   bio-integrity-auto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
+index 0000000..a278c464c8b5004d0769b8b3182512f6b89d44b5
 --- /dev/null
 +++ b/block/flow-iosched.c
 +// SPDX-License-Identifier: GPL-2.0
@@ -1638,7 +1638,7 @@ index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
 +static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 +{										\
 +	struct flow_data *fd = e->elevator_data;				\
-+
++	\
 +	guard(spinlock_irqsave)(&fd->lock);					\
 +	return sprintf(page, "%d\n", fd->field);				\
 +}										\
@@ -1660,7 +1660,7 @@ index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
 +static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 +{										\
 +	struct flow_data *fd = e->elevator_data;				\
-+
++	\
 +	guard(spinlock_irqsave)(&fd->lock);					\
 +	return sprintf(page, "%u\n", fd->field);				\
 +}										\
@@ -1682,7 +1682,7 @@ index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
 +static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 +{										\
 +	struct flow_data *fd = e->elevator_data;				\
-+
++	\
 +	guard(spinlock_irqsave)(&fd->lock);					\
 +	return sprintf(page, "%u\n", (unsigned int)fd->field);			\
 +}										\
@@ -1704,7 +1704,7 @@ index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
 +static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 +{										\
 +	struct flow_data *fd = e->elevator_data;				\
-+
++	\
 +	guard(spinlock_irqsave)(&fd->lock);					\
 +	return sprintf(page, "%llu\n", fd->field);				\
 +}										\
@@ -1783,7 +1783,7 @@ index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
 +	struct elevator_queue *e, char *page)				\
 +{									\
 +	struct flow_data *fd = e->elevator_data;			\
-+
++	\
 +	guard(spinlock_irqsave)(&fd->lock);				\
 +	return sprintf(page, "%u\n", fd->starvation_max[lane_idx]);	\
 +}									\
