@@ -57,5 +57,6 @@ the kernel/blk-mq layer it runs on.
 
 ## Code of Conduct
 
-Be constructive.  This is a small open-source project maintained in spare
-time, and everyone benefits when discussions stay technical and focused.
+This project adheres to the [Code of Conduct](CODE_OF_CONDUCT.md). By
+participating, you are expected to uphold its terms. Report unacceptable
+behaviour to **galpt@v.recipes**.
