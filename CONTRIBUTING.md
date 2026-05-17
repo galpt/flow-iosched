@@ -58,5 +58,4 @@ the kernel/blk-mq layer it runs on.
 ## Code of Conduct
 
 This project adheres to the [Code of Conduct](CODE_OF_CONDUCT.md). By
-participating, you are expected to uphold its terms. Report unacceptable
-behaviour to **galpt@v.recipes**.
+participating, you are expected to uphold its terms.
