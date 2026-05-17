@@ -303,6 +303,7 @@ static inline u32 flow_raise_bounded(u32 signal, u32 delta, u32 signal_max)
 	if (!delta)
 		return signal;
 	u32 sum = signal + delta;
+
 	return sum > signal_max ? signal_max : sum;
 }
 
@@ -318,6 +319,7 @@ static inline u32 flow_decay_geometric(u32 signal, u32 shift)
 	if (!signal)
 		return 0;
 	u32 d = shift ? signal >> shift : 1;
+
 	if (!d)
 		d = 1;
 	return signal > d ? signal - d : 0;
@@ -326,6 +328,7 @@ static inline u32 flow_decay_geometric(u32 signal, u32 shift)
 static inline u32 flow_decay_confidence(u32 signal, u32 delta, u32 shift)
 {
 	u32 s = flow_decay_geometric(signal, shift);
+
 	if (delta > 1)
 		s = flow_decay_bounded(s, delta - 1);
 	return s;
@@ -434,7 +437,9 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 	    ktime_get_ns() - atomic64_read(&ficq->last_io_completed) >
 		FLOW_BUDGET_REFRESH_NS) {
 		old_budget = atomic64_add_return(budget, &ficq->io_budget_sectors);
+
 		s64 cap = budget * 4;
+
 		if (old_budget > cap)
 			atomic64_set(&ficq->io_budget_sectors, cap);
 		flow_decay_geometric_atomic(&ficq->containment_score,
@@ -453,7 +458,9 @@ static bool flow_check_budget_and_contain(struct flow_icq_data *ficq,
 					  FLOW_SCORE_INC_AT_EXHAUST,
 					  FLOW_HOG_SCORE_MAX);
 		/* Track exhaustion for autotune metrics */
+
 		struct flow_hctx_data *khd = hctx->sched_data;
+
 		if (khd)
 			atomic64_inc(&khd->m_budget_exhaustions);
 	}
@@ -790,8 +797,11 @@ static void flow_requeue_request(struct request *rq)
 		return;
 
 	/* Return consumed sectors to the process budget */
+
 	s64 sectors = (s64)blk_rq_sectors(rq);
+
 	if (sectors > 0)
+
 		atomic64_add(sectors, &ficq->io_budget_sectors);
 }
 
@@ -898,10 +908,14 @@ static bool flow_fill_dispatch_locked(struct flow_data *fd,
 			/* Step 3: Normal priority: Read → Write → Contained */
 			lane = FLOW_LANE_READ;
 			rd = flow_first_rq_for_lane(fd, lane);
-			if (!rd) { lane = FLOW_LANE_WRITE;
-				rd = flow_first_rq_for_lane(fd, lane); }
-			if (!rd) { lane = FLOW_LANE_CONTAINED;
-				rd = flow_first_rq_for_lane(fd, lane); }
+			if (!rd) {
+				lane = FLOW_LANE_WRITE;
+				rd = flow_first_rq_for_lane(fd, lane);
+			}
+			if (!rd) {
+				lane = FLOW_LANE_CONTAINED;
+				rd = flow_first_rq_for_lane(fd, lane);
+			}
 		} else {
 			/* Starvation override: pick from the starved lane */
 			rd = flow_first_rq_for_lane(fd, lane);
@@ -953,14 +967,20 @@ dispatch_rd:
 		 * dispatched on the next cycle when counters reset.
 		 */
 		if (optype == FLOW_READ && rd_count >= fd->batch_max_read) {
+
 			struct rb_node *next = rb_next(&rd->dl_group->node);
+
 			if (next)
+
 				continue;
 			break;
 		}
 		if (optype == FLOW_WRITE && wr_count >= fd->batch_max_write) {
+
 			struct rb_node *next = rb_next(&rd->dl_group->node);
+
 			if (next)
+
 				continue;
 			break;
 		}
@@ -1076,14 +1096,18 @@ static void flow_completed_request(struct request *rq, u64 now)
 	 */
 	s64 sectors = (s64)blk_rq_sectors(rq);
 	s64 refill = sectors / FLOW_REFILL_DIV;
+
 	if (refill > 0) {
 		struct flow_data *fd = rq->q->elevator->elevator_data;
 		s64 budget = (rq->cmd_flags & REQ_SYNC) ?
 			     atomic_read(&fd->sync_budget_sectors) :
 			     atomic_read(&fd->async_budget_sectors);
-		if (budget < 64) budget = 64;
+
+		if (budget < 64)
+			budget = 64;
 		s64 new_budget = atomic64_add_return(refill, &ficq->io_budget_sectors);
 		s64 cap = budget * 4;
+
 		if (unlikely(new_budget > cap))
 			atomic64_set(&ficq->io_budget_sectors, cap);
 	}
@@ -1284,7 +1308,8 @@ reschedule:
 
 /* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
  * For kernels 6.12-6.17 (which pass elevator_type), apply
- * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
+ * patches/0002-linux6.12-flow-iosched-compat.patch after this one.
+ */
 static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 {
 	struct flow_data *fd;
@@ -1514,8 +1539,11 @@ static ssize_t flow_version_show(struct elevator_queue *e, char *page)
 
 static ssize_t flow_read_priority_show(struct elevator_queue *e, char *page)
 {
+
 	struct flow_data *fd = e->elevator_data;
+
 	guard(spinlock_irqsave)(&fd->lock);
+
 	return sprintf(page, "%d\n", fd->read_priority);
 }
 
@@ -1540,6 +1568,7 @@ static ssize_t flow_read_priority_store(struct elevator_queue *e,
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%d\n", fd->field);				\
 }										\
@@ -1561,6 +1590,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%u\n", fd->field);				\
 }										\
@@ -1582,6 +1612,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%u\n", (unsigned int)fd->field);			\
 }										\
@@ -1603,6 +1634,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
+
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%llu\n", fd->field);				\
 }										\
@@ -1623,8 +1655,11 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 /* Custom show/store for atomic_t budget fields (can't use FLOW_SYSFS_S32_RW) */
 static ssize_t flow_sync_budget_sectors_show(struct elevator_queue *e, char *page)
 {
+
 	struct flow_data *fd = e->elevator_data;
+
 	guard(spinlock_irqsave)(&fd->lock);
+
 	return sprintf(page, "%d\n", atomic_read(&fd->sync_budget_sectors));
 }
 
@@ -1645,8 +1680,11 @@ static ssize_t flow_sync_budget_sectors_store(struct elevator_queue *e,
 
 static ssize_t flow_async_budget_sectors_show(struct elevator_queue *e, char *page)
 {
+
 	struct flow_data *fd = e->elevator_data;
+
 	guard(spinlock_irqsave)(&fd->lock);
+
 	return sprintf(page, "%d\n", atomic_read(&fd->async_budget_sectors));
 }
 
@@ -1675,6 +1713,7 @@ static ssize_t flow_starvation_max_##field_suffix##_show(		\
 	struct elevator_queue *e, char *page)				\
 {									\
 	struct flow_data *fd = e->elevator_data;			\
+
 	guard(spinlock_irqsave)(&fd->lock);				\
 	return sprintf(page, "%u\n", fd->starvation_max[lane_idx]);	\
 }									\
