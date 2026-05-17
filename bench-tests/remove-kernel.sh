@@ -9,7 +9,7 @@
 #   ./remove-kernel.sh --all
 #
 # Examples:
-#   ./remove-kernel.sh 7.0.5    # Remove kernel 7.0.5 test install
+#   ./remove-kernel.sh 7.0.8    # Remove kernel 7.0.8 test install
 #   ./remove-kernel.sh --list   # List installed flow-iosched kernels
 #   ./remove-kernel.sh --all    # Remove all flow-iosched test kernels
 #
@@ -87,7 +87,7 @@ list_installed() {
     printf '%s\n' "${versions[@]}" | sort -uV
 }
 
-# Get the full version of the currently-booted kernel (e.g. 7.0.5-2-cachyos or 7.0.5-flow)
+# Get the full version of the currently-booted kernel (e.g. 7.0.8-1-cachyos or 7.0.8-flow)
 running_version() {
     uname -r
 }
@@ -161,7 +161,7 @@ remove_version() {
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <version|--list|--all>"
     echo ""
-    echo "  ./remove-kernel.sh 7.0.5    # Remove kernel 7.0.5"
+    echo "  ./remove-kernel.sh 7.0.8    # Remove kernel 7.0.8"
     echo "  ./remove-kernel.sh --list   # List installed versions"
     echo "  ./remove-kernel.sh --all    # Remove all versions"
     echo ""

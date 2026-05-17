@@ -7,7 +7,7 @@
 #   ./build-kernel.sh <version>
 #
 # Examples:
-#   ./build-kernel.sh 7.0.5    # Build upstream 7.0.5 with flow-iosched
+#   ./build-kernel.sh 7.0.8    # Build upstream 7.0.8 with flow-iosched
 #   ./build-kernel.sh 6.18     # Build upstream 6.18 with flow-iosched
 #   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
 #
@@ -692,7 +692,7 @@ main() {
         echo "Usage: $0 <kernel-version>"
         echo ""
         echo "Examples:"
-        echo "  $0 7.0.5    # Build upstream 7.0.5 with flow-iosched"
+        echo "  $0 7.0.8    # Build upstream 7.0.8 with flow-iosched"
         echo "  $0 6.18     # Build upstream 6.18"
         echo "  $0 6.12     # Build upstream 6.12 with compat patch"
         echo ""

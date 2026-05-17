@@ -159,7 +159,7 @@ that do not fit in the flowchart:
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
 > [!IMPORTANT]
-> The `patches/` directory ships `0001-linux7.0-flow-iosched-v3.0.patch`
+> The `patches/` directory ships `0001-linux7.0-flow-iosched-v3.1.patch`
 > for kernel 7.0.x / 6.18+ and `0002-linux6.12-flow-iosched-compat.patch`
 > for kernels 6.12–6.17.  Apply 0001 first, then 0002 for 6.12–6.17.
 
@@ -317,10 +317,10 @@ work per I/O — and that overhead matters on real hardware too.
 
 | Chart | What to look for |
 |-------|-------------------|
-| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** — higher is better.  The v3.0 simplification narrowed the read gap to kyber and mq-deadline compared to v2.0.  Writes remain slower, which is expected: writes pass through budget containment and deadline dispatch, while reads bypass both via the Read lane's FIFO path.  BFQ's per-process accounting keeps it at the bottom on this zero-latency device — a reminder that scheduling always costs something. |
+| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** — higher is better.  The v3.0/v3.1 simplification narrowed the read gap to kyber and mq-deadline compared to v2.0.  Writes remain slower, which is expected: writes use a 2000 ms deadline window (Write lane) while reads use the FIFO Read lane.  BFQ's per-process accounting keeps it at the bottom on this zero-latency device — a reminder that scheduling always costs something. |
 | ![Latency](benchmark-runs/null_blk/charts/latency.png) | **Read latency** — lower is better.  flow-iosched read latency is competitive with kyber and mq-deadline across all read-bearing workloads.  Write-only workloads naturally have no read latency bars. |
 | ![Per-workload IOPS](benchmark-runs/null_blk/charts/per_workload.png) | **Per-workload breakdown** — every workload sorted best-to-worst for that specific workload.  flow-iosched sits mid-pack on reads; writes trail the leaders, which is the honest picture of where the scheduler stands today on synthetic zero-latency media. |
-| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Averages across all workloads** — one glance at the spread.  flow-iosched lands mid-pack on IOPS and read latency, with write latency still the area needing most improvement.  The v3.0 re-architecture did not materially change this picture. |
+| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Averages across all workloads** — one glance at the spread.  flow-iosched lands mid-pack on IOPS and read latency, with write latency still the area needing most improvement.  The v3.0/v3.1 re-architecture did not materially change this picture. |
 
 > [!NOTE]
 > **Why are writes slower?**  flow-iosched classifies writes as background
@@ -344,7 +344,7 @@ and PCIe transfer overhead.
 | ![Consolidated averages](benchmark-runs/physical_device/charts/comparison.png) | **Averages across all workloads** — the spread visible on null_blk has collapsed.  Read IOPS, write IOPS, and latencies are all within a narrow band across schedulers.  This is the most important chart in this section: it shows that **flow-iosched's lane-based scheduling does not penalise you on real hardware.** |
 
 > [!NOTE]
-> These runs use the v3.0 flow-iosched module built against and loaded on
+> These runs use the flow-iosched module built against and loaded on
 > the stock CachyOS kernel (`7.0.8-1-cachyos`) via the standalone module
 > install script (`install-flow-iosched.sh`).  The `null_blk` charts were
 > measured first, then the physical device — both on the same boot session
@@ -396,8 +396,8 @@ kernel.org, applies the flow-iosched patches, builds the kernel and modules,
 installs them to `/boot` with a unique name, and creates a Limine boot entry.
 
 ```bash
-# Download, build, and install kernel 7.0.5 with flow-iosched
-./bench-tests/build-kernel.sh 7.0.5
+# Download, build, and install kernel 7.0.8 with flow-iosched
+./bench-tests/build-kernel.sh 7.0.8
 
 # Build kernel 6.18 (same API — applies 0001 patch only)
 ./bench-tests/build-kernel.sh 6.18
@@ -519,7 +519,7 @@ flow-iosched test kernel without affecting the default system kernel.
 
 ```bash
 # Remove a specific kernel
-sudo ./bench-tests/remove-kernel.sh 7.0.5
+sudo ./bench-tests/remove-kernel.sh 7.0.8
 
 # List all installed flow-iosched kernels
 sudo ./bench-tests/remove-kernel.sh --list
