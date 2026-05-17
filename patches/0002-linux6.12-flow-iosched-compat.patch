@@ -1,43 +1,65 @@
 From: Galih Tama <galpt@v.recipes>
 Date: 2026-05-17
-Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.1)
+Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.1 LSB)
 
-NOTE: This compat patch was originally written for v3.0.  The v3.1 source
-has been restructured (budget containment removed, alloc_sched_data added,
-init_sched uses pre-allocated fd from eq->elevator_data).  This patch may
-need adjustments for the new source layout.  The core changes remain:
-  - flow_init_sched signature: (q, elevator_queue *eq) → (q, elevator_type *e)
-  - Add struct elevator_queue *eq; declaration
-  - Add eq = elevator_alloc(q, e); with error handling
+Kernels 6.12-6.17 have a different init_sched API signature and lack
+the alloc_sched_data / free_sched_data elevator ops.  This patch adapts
+the v3.1 LSB source for those kernels:
+
+  - flow_init_sched signature: (q, elevator_queue *eq) -> (q, elevator_type *e)
+  - Add elevator_alloc() and kzalloc() calls inside init_sched
   - Add kobject_put(&eq->kobj) error path
-  - Use eq->elevator_data for fd (already pre-allocated by alloc_sched_data
-    callback — register if supported by the target kernel)
+  - Remove alloc_sched_data and free_sched_data from ops table
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/flow-iosched.c | 29 ++++++++++++++++++++++++-----
- 1 file changed, 24 insertions(+), 5 deletions(-)
+ block/flow-iosched.c | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-@@ -1007,10 +1007,11 @@ reschedule:
-  * For kernels 6.12-6.17 (which pass elevator_type), apply
-  * patches/0002-linux6.12-flow-iosched-compat.patch after this one.
-  */
+index 2ba4c0b..f8e9d2a 100644
+--- a/block/flow-iosched.c
++++ b/block/flow-iosched.c
+@@ -447,14 +447,21 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
+ 	       !RB_EMPTY_ROOT(&fd->write_root.rb_root);
+ }
+ 
+-/* 6.18+ / 7.x init_sched: passes pre-allocated elevator_queue.
+- * 6.12-6.17: apply 0002 compat patch. */
 -static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
++/* 6.12-6.17 init_sched: receives elevator_type, not pre-allocated eq. */
 +static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
  {
- 	struct flow_data *fd;
- 	int ret = -ENOMEM;
+-	struct flow_data *fd = eq->elevator_data;
 +	struct elevator_queue *eq;
-
- 	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
- 	if (!fd) {
-@@ -1103,6 +1104,8 @@ destroy_dl_pool:
- 	mempool_destroy(fd->dl_group_pool);
- destroy_dl_cache:
- 	kmem_cache_destroy(fd->dl_group_cache);
-+out_put_eq:
++	struct flow_data *fd;
+ 
+-	if (!fd)
++	eq = elevator_alloc(q, e);
++	if (!eq)
+ 		return -ENOMEM;
++	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
++	if (!fd) {
++		kobject_put(&eq->kobj);
++		return -ENOMEM;
++	}
++	eq->elevator_data = fd;
+ 	fd->rq_data_cache = kmem_cache_create("flow_rq_data",
+ 		sizeof(struct flow_rq_data), 0, SLAB_HWCACHE_ALIGN, NULL);
+ 	if (!fd->rq_data_cache)
+@@ -496,6 +503,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+ drq_cache:
+ 	kmem_cache_destroy(fd->rq_data_cache);
+ free_fd:
 +	kobject_put(&eq->kobj);
- destroy_rq_pool:
- 	mempool_destroy(fd->rq_data_pool);
- destroy_rq_cache:
+ 	kfree(fd);
+ 	return -ENOMEM;
+ }
+@@ -658,8 +666,6 @@ static struct elevator_type mq_flow = {
+ 	.ops = {
+ 		.depth_updated		= flow_depth_updated,
+-		.alloc_sched_data	= flow_alloc_sched_data,
+-		.free_sched_data	= flow_free_sched_data,
+ 		.next_request		= flow_next_request,
+ 		.former_request		= flow_former_request,
+ 		.limit_depth		= flow_limit_depth,

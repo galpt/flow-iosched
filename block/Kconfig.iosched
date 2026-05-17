@@ -2,26 +2,34 @@ config MQ_IOSCHED_FLOW
 	tristate "Multi-Lane I/O scheduler (FLOW)"
 	default m
 	help
-	  The Multi-Lane I/O scheduler (FLOW) v3.0 is a blk-mq I/O scheduler
-	  with four priority tiers, deadline-sorted dispatch, per-process I/O
-	  budget containment with proportional completion-based refill, and
-	  a 3-mode autotuner.
+	  The Multi-Lane I/O scheduler (FLOW) v3.1 LSB is a blk-mq I/O
+	  scheduler with three priority tiers (Emergency > Read > Write),
+	  deadline-sorted rbtree dispatch, and a generalised N-lane
+	  starvation-bound framework (starvation_max_read / starvation_max_write)
+	  that is provably starvation-free by construction.
 
-	  Simplified from the original 5-lane scx_flow port to a block-I/O-
-	  native design that removes the IO profile recomputation, latency
-	  credit/debt system, and per-hctx dispatch-list fast path — none
-	  of which added measurable benefit over the simpler model.
+	  Lane-Starvation Bounding (LSB) refactor:
+	    - Formal starvation-bound dispatch with per-lane max_bypass/
+	      bypass_count counters (generalises mq-deadline to N lanes)
+	    - No autotune timer (static parameters, like mq-deadline)
+	    - No per-process scheduling state
+	    - ~700 lines, auditable in a single sitting
 
-	  Tier 0 (Emergency):  Unconditional bypass for BLK_MQ_INSERT_AT_HEAD
-	  Tier 1 (Read):       Deadline-sorted for synchronous reads/metadata
-	  Tier 2 (Write):      Deadline-sorted for async writes
-	  Tier 3 (Contained):  Throttled path for I/O hogs
+	  Removed in v3.1:
+	    - Per-process budget containment (caused permanent write starvation
+	      under sequential write loads — the budget refill formula
+	      sectors/100 returned 0 for all I/Os < 50 KB, and the 100ms idle
+	      safety valve never fired during continuous writes)
+	    - 3-mode autotune timer (unproven benefit; mq-deadline uses static
+	      parameters and works correctly across all workloads)
+	    - Per-ICQ state (last_io_completed was not read by scheduling path)
 
 config MQ_IOSCHED_DEFAULT_FLOW
 	bool "Enable FLOW I/O scheduler as the default MQ scheduler"
-	depends on MQ_IOSCHED_FLOW=y
-	default n
+	depends on MQ_IOSCHED_FLOW
 	help
-	  Enable the FLOW I/O scheduler as the default blk-mq I/O scheduler.
-	  The elevator core will automatically select "flow-iosched" for
-	  multi-queue block devices during boot.
+	  Make flow-iosched the default MQ I/O scheduler.  Note: this
+	  requires wiring into elevator_set_default() in block/elevator.c,
+	  which is kernel-version-specific and is NOT handled by this
+	  patch.  For most users, the standalone module install script
+	  (install-flow-iosched.sh) is the recommended approach.

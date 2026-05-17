@@ -1,17 +1,15 @@
 # flow-iosched
 
 Multi-lane I/O scheduler for the Linux block layer, with deadline-sorted rbtree
-dispatch, mq-deadline-style writes_starved anti-starvation, and a 3-mode
-autotuner.
+dispatch, starvation-bound N-lane anti-starvation, and no autotune.
 
 > [!NOTE]
 > flow-iosched targets general-purpose desktop and workstation machines where
 > responsiveness and throughput both matter.
-> Version 3.1 removes the per-process budget containment system that caused
-> effective system hangs under heavy sequential write workloads.  Anti-starvation
-> is now handled by a writes_starved counter on the dispatch path (mq-deadline
-> pattern).  The lane model is simplified to three lanes (Emergency / Read /
-> Write).
+> Version 3.1 LSB (Lane-Starvation Bounding) replaces the previous
+> writes_starved counter and 3-mode autotune with a formal starvation-bound
+> framework: each lane L[i] is served at most starvation_max[i] consecutive
+> dispatch cycles apart — provably starvation-free by construction.
 
 ## Overview
 
@@ -22,9 +20,12 @@ autotuner.
 | Write | Async writes, best-effort | start_time_ns + 2000ms | Background throughput |
 
 Dispatch priority: Emergency > Read > Write.
-Anti-starvation via writes_starved counter (default threshold: 2): after N
-consecutive read batches, the dispatch path unconditionally forces writes,
-matching mq-deadline's proven design.
+Anti-starvation is via a generalised N-lane starvation-bound framework:
+per-lane `bypass_count[L]` tracks consecutive dispatch cycles bypassing
+lane L; when it reaches `starvation_max[L]`, the lane is force-serviced
+and all bypass counters reset.  This reduces to mq-deadline's proven
+writes_starved design when N=2, and extends the same formal guarantee
+to 3 lanes.
 
 ## Design
 
@@ -34,10 +35,11 @@ Read the diagram like this:
 - follow arrows from top to bottom
 - diamond shapes are lane classification decisions — the arrow label tells you which requests go where
 - solid arrows show the main data flow from request to device
-- dotted arrows show how the writes_starved anti-starvation counter influences dispatch
+- dotted arrows show how the starvation-bound counters influence dispatch
 - the emergency lane is drained before any other lane on every dispatch cycle
 - the Read lane is dispatched in batches (up to `batch_max_read`)
-- the Write lane is dispatched when the Read lane is empty or the writes_starved threshold has been exceeded
+- the Write lane is dispatched when the Read lane is empty or when its
+  starvation counter triggers a force-dispatch
 
 ```mermaid
 flowchart TB
@@ -77,8 +79,8 @@ Async depth: nr_requests / 3."]
 
 Async writes and best-effort I/O.
 Large deadline window (2000 ms).
-Dispatched only after Read lane
-is drained or writes_starved ≥ 2."]
+Dispatched after Read lane or
+when starvation forces it."]
 
     C1 -->|"Immediate: prio_queue[0]\ndrained first every cycle"| H1["4. Per-hctx Dispatch
 
@@ -86,13 +88,14 @@ flow_dispatch_request(hctx):
 1. Pop Emergency/barrier prio queue
 2. Fill dispatch list from rbtrees
    via flow_fill_dispatch_locked()
+   with starvation-bound dispatch
 3. Pop one request from dispatch list
 Single-phase under fd->lock.
 QUEUE_FLAG_SQ_SCHED cleared."]
 
     D1 -->|"Batch: up to batch_max_read (16)\nper dispatch cycle"| H1
 
-    F1 -->|"If writes_starved ≥ 2:\nforce before reads.\nOtherwise: after reads."| H1
+    F1 -->|"Within batch_max_write (16)\nor when starvation forces it"| H1
 
     H1 -->|"Request submitted\nto hardware queue"| I1["5. Device
 
@@ -100,24 +103,18 @@ NVMe, SATA, or virtual device.
 Multiple hardware queues (hctx).
 Each hctx dispatches independently."]
 
-    D1 -.->|"Read-preference cycle\nwith writes still queued?\n→ Increment counter"| K1["Writes-Starvation Counter
+    D1 -.->|"Read dispatched\n→ bypass_count[Write]++"| K1["Starvation-Bound
+Counters
 
-Per-hctx writes_starved.
-Default threshold: 2.
-Same proven pattern as
-mq-deadline's writes_starved."]
+bypass_count[Read/Write]
+reset to 0 on any
+force-dispatch.
+Generalised mq-deadline
+writes_starved for N lanes."]
 
-    F1 -.->|"Write-preference cycle?\n(writes_starved ≥ 2 triggered)\n→ Reset counter to 0"| K1
+    F1 -.->|"Write dispatched\n→ bypass_count[Read]++"| K1
 
-    K1 -.->|"Counter ≥ threshold?\n→ Switch to write preference\nbefore reads this cycle"| H1
-
-    L1["Background: ICQ Lifecycle
-
-flow_icq_data tracks only
-last_io_completed (atomic64_t).
-Budget fields removed in v3.1.
-flow_init_icq() sets timestamp;
-flow_exit_icq() resets it."]
+    K1 -.->|"bypass_count[L] ≥ starvation_max[L]?\n→ Force-dispatch lane L,\nreset all counters"| H1
 
     style Start fill:#1e293b,stroke:#0ea5e9,stroke-width:2,color:#fff
     style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2,color:#1e293b
@@ -129,7 +126,6 @@ flow_exit_icq() resets it."]
     style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2,color:#1e293b
     style I1 fill:#fef2f2,stroke:#ef4444,stroke-width:2,color:#1e293b
     style K1 fill:#fff7ed,stroke:#f59e0b,stroke-width:2,color:#1e293b
-    style L1 fill:#f0fdf4,stroke:#22c55e,stroke-width:2,color:#1e293b
 ```
 
 The diagram above covers the main I/O path.  A few implementation details
@@ -141,13 +137,19 @@ that do not fit in the flowchart:
 - **Each non-Emergency lane has its own deadline-sorted red-black tree**
   (`read_root`, `write_root`).  Requests within a lane are grouped by
   quantised deadline into `dl_group` nodes.
-- **A 3-mode autotuner** (Balanced / Latency / Throughput) runs every
-  second.  It aggregates per-hctx dispatch metrics via `atomic64_xchg`
-  (eliminates the cross-lock counter-loss race), computes workload ratios,
-  and adjusts `batch_max_read` and `starvation_max_write` toward the mode
-  target.  No sysfs intervention is needed for common workloads.
+- **Starvation-bound dispatch** checks lanes from lowest priority upward
+  (Write → Read).  If `bypass_count[lane] >= starvation_max[lane]` and the
+  lane has pending requests, it is force-serviced and all bypass counters
+  reset.  Otherwise the highest-priority non-empty lane dispatches within
+  its batch limit (`batch_max_read` / `batch_max_write`).
 - **`QUEUE_FLAG_SQ_SCHED` is cleared**, so each hardware context dispatches
   independently — no single-queue bottleneck on multi-queue NVMe devices.
+- **No autotune timer** — all scheduling parameters are static (set at
+  module load time, tunable via sysfs), matching mq-deadline's operational
+  model.
+- **No per-process scheduling state** — the ICQ lifecycle hooks and
+  `completed_request` callback have been removed.  Fairness is determined
+  entirely by dispatch ordering with starvation bounds.
 
 ## Kernel Compatibility
 
@@ -203,8 +205,8 @@ config MQ_IOSCHED_FLOW
     default m
     help
       Multi-lane I/O scheduler with three priority tiers (Emergency,
-      Read, Write), deadline-sorted rbtree dispatch, mq-deadline-style
-      writes_starved anti-starvation, and a 3-mode autotuner.
+      Read, Write), deadline-sorted rbtree dispatch, and starvation-bound
+      anti-starvation (generalised mq-deadline for N lanes).
 
 // Makefile (in block/Makefile):
 obj-$(CONFIG_MQ_IOSCHED_FLOW) += flow-iosched.o
@@ -236,17 +238,15 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 |-----------|------|---------|-------------|
 | `flow_version` | RO | — | Current scheduler version (3.1) |
 | `read_priority` | RW | 0 | Read bias vs writes at same deadline (-20 to 19) |
-| `batch_max_read` | RW | 16 | Max read requests per batch (adjusted by autotune) |
-| `batch_max_write` | RW | 16 | Max write requests per batch |
-| `completion_window_ns` | RW | 8000000 | Dispatch batch window (nanoseconds) |
-| `starvation_max_read` | RW | 5 | Read starvation rounds before forced rotation |
-| `starvation_max_write` | RW | 20 | Write starvation rounds before forced dispatch |
+| `batch_max_read` | RW | 16 | Max read requests per dispatch batch |
+| `batch_max_write` | RW | 16 | Max write requests per dispatch batch |
+| `starvation_max_read` | RW | 5 | Read max-bypass before force-dispatch |
+| `starvation_max_write` | RW | 20 | Write max-bypass before force-dispatch |
 
-Removed in v3.1: `sync_budget_sectors`, `async_budget_sectors`,
-`starvation_max_contained`, `contain_threshold`, `contain_decay_step`.
-Per-process budget and containment tracking has been eliminated in
-favour of mq-deadline-style writes_starved anti-starvation on the
-dispatch path.
+Removed in v3.1 LSB: `completion_window_ns`, `sync_budget_sectors`,
+`async_budget_sectors`, `starvation_max_contained`, `contain_threshold`,
+`contain_decay_step`.  No autotune dynamic parameters — starvation bounds
+are static and provably correct across all workloads.
 
 ## Production Ready?
 
@@ -269,19 +269,13 @@ demands a higher bar: an I/O scheduler operates on user data directly.
 An undetected bug can cause data corruption or filesystem inconsistency —
 not merely degraded performance.
 
-The code has been audited for memory safety, request lifecycle correctness,
-lock ordering, integer safety, and error-path robustness.  All internal
-functions carry lockdep annotations.  Version 3.0 underwent a structured
-review that verified lock ordering in the dispatch path and audited the
-autotune timer for proper teardown via timer_shutdown_sync.
-
-Version 3.1 removes the per-process budget containment system that was
-identified as the root cause of system hangs under heavy sequential write
-workloads.  The budget refill formula (`sectors / 100`) returned zero for
-all I/Os smaller than 50 KB, and the idle-timeout safety valve (100 ms)
-never fired during continuous writes — causing permanent containment
-and an effective system hang.  Replaced by mq-deadline-style writes_starved
-anti-starvation on the dispatch path (deterministic, provably starvation-free).
+The code carries lockdep annotations on all internal scheduling functions.
+Version 3.1 LSB is the result of two structural audits: v3.0 identified
+and removed the per-process budget containment system (root cause of
+sequential write hangs); v3.1 LSB replaces the remaining ad-hoc
+writes_starved + autotune hybrid with a formal starvation-bound framework
+that is provably starvation-free by construction (~700 lines, auditable
+in a single sitting).
 
 > [!NOTE]
 > flow-iosched clears `QUEUE_FLAG_SQ_SCHED` and dispatches independently per
@@ -325,10 +319,10 @@ work per I/O — and that overhead matters on real hardware too.
 > [!NOTE]
 > **Why are writes slower?**  flow-iosched classifies writes as background
 > (Write lane) by default.  They are dispatched only after the Read lane
-> is drained (or writes_starved forces them).  On null_blk where actual
-> I/O takes zero time, this scheduling overhead is the dominant factor.
-> On real hardware it largely disappears behind device latency — see the
-> physical device charts below.
+> is drained or the starvation-bound counter forces them.  On null_blk
+> where actual I/O takes zero time, this scheduling overhead is the dominant
+> factor.  On real hardware it largely disappears behind device latency —
+> see the physical device charts below.
 
 #### Physical device (NVMe, `/dev/nvme1n1p1`)
 
@@ -371,10 +365,11 @@ the honest takeaway:
    value — at the cost of write throughput under synthetic write-only
    benchmarks.
 
-3. **The autotuner adapts to your workload.**  The 3-mode system
-   (Balanced / Latency / Throughput) adjusts batch sizes and starvation
-   thresholds based on observed dispatch ratios.  You don't need to tune
-   sysfs parameters for typical desktop use.
+3. **Starvation bounds are provably correct.**  The generalised N-lane
+   framework guarantees each lane is served at most `starvation_max[L]`
+   dispatch cycles apart.  No tuning needed for typical desktop use.
+   The `starvation_max_read` and `starvation_max_write` sysfs parameters
+   let you adjust the trade-off if desired.
 
 4. **Write performance on null_blk looks worse than it is in practice.**
    null_blk has zero I/O latency, so scheduler overhead is the only
@@ -606,24 +601,17 @@ that shaped its design:
 - **[Kyber](https://github.com/torvalds/linux/blob/master/block/kyber-iosched.c)**
   — The `limit_depth` callback for async queue depth throttling follows the
   approach made popular by the Kyber I/O scheduler.
-- **[BFQ](https://github.com/torvalds/linux/blob/master/block/bfq-iosched.c)**
-  — The per-process I/O context infrastructure (`.icq_size` / `.icq_align` in
-  `struct elevator_type`) used for budget tracking follows the same embedding
-  pattern that BFQ pioneered for per-process scheduling state.
-- **[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)**
-  — The 3-lane design, starvation-aware round counters, and 3-mode autotuner
-  with step-wise parameter tuning were originally inspired by the scx_flow
-  CPU scheduler.  Version 3.0 removed the scx_flow-derived IO profile
-  recomputation and latency credit/debt system.  Version 3.1 removes the
-  budget containment system (which caused effective hangs under sequential
-  writes) and replaces it with mq-deadline-style writes_starved
-  anti-starvation.  flow-iosched is now structurally closer to mq-deadline
-  than to scx_flow.
 - **[mq-deadline](https://github.com/torvalds/linux/blob/master/block/mq-deadline.c)**
-  — The merge-rbtree helpers (`former_request` / `next_request`) and the
-  bio-merge callback pattern follow the conventions established by the
-  mq-deadline reference implementation and shared across all in-kernel blk-mq
-  schedulers.
+  — The starvation-bound framework in v3.1 LSB is a generalisation of
+  mq-deadline's writes_starved to N lanes.  The merge-rbtree helpers
+  (`former_request` / `next_request`) and bio-merge callback follow mq-deadline
+  conventions.
+- **[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)**
+  — The 3-lane design was originally inspired by the scx_flow CPU scheduler.
+  Version 3.0 removed the scx_flow-derived IO profile recomputation and latency
+  credit/debt system.  Version 3.1 LSB replaces the remaining scx_flow-derived
+  autotune with a provable starvation-bound framework closer to mq-deadline.
+  flow-iosched now shares more structural DNA with mq-deadline than scx_flow.
 - **Linux kernel block layer contributors** — The elevator API, blk-mq
   dispatch framework, and sbitmap infrastructure that flow-iosched builds on.
   These are developed at

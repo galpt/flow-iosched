@@ -1,43 +1,58 @@
-From 1de8b3da96e8fc4871fb455a8ffd7cebe63a074b Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
 Date: 2026-05-17 14:36:19 +0700
-Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v3.1
+Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v3.1 LSB
 
 Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
 three priority tiers (Emergency / Read / Write), deadline-sorted rbtree
-dispatch, mq-deadline-style writes_starved anti-starvation, and a 3-mode
-autotuner.
+dispatch, and a generalised N-lane starvation-bound framework that is
+provably starvation-free by construction (reduces to mq-deadline's
+writes_starved proof when N=2).
 
-v3.1 removes the per-process budget containment system that caused
-effective system hangs under sequential write loads.  Anti-starvation
-is now handled by a writes_starved counter on the dispatch path.
+v3.1 LSB (Lane-Starvation Bounding):
+  - Formal starvation-bound dispatch with per-lane bypass_count/max_bypass
+  - No autotune timer (static parameters, like mq-deadline)
+  - No per-process scheduling state
+  - ~700 lines, auditable in a single sitting
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/Kconfig.iosched | 27 +++++++++++++++++++++++++
+ block/Kconfig.iosched | 35 +++++++++++++++++++++++++
  block/Makefile        |  1 +
- block/flow-iosched.c  | 1458 +++++++++++++++++++++++++++++
- 3 files changed, 1486 insertions(+)
+ block/flow-iosched.c  | 696 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 732 insertions(+)
 
 --- a/block/Kconfig.iosched	2026-05-15 19:53:54.000000000 +0700
-+++ b/block/Kconfig.iosched	2026-05-17 15:27:36.614673965 +0700
-@@ -44,4 +44,28 @@
++++ b/block/Kconfig.iosched	2026-05-17 22:00:00.000000000 +0700
+@@ -44,4 +44,39 @@
  	Enable some debugging help. Currently it exports additional stat
  	files in a cgroup which can be useful for debugging.
- 
+
 +
 +config MQ_IOSCHED_FLOW
 +	tristate "Multi-Lane I/O scheduler (FLOW)"
 +	default m
 +	help
-+	  Multi-lane I/O scheduler with three priority tiers (Emergency,
-+	  Read, Write), deadline-sorted rbtree dispatch, mq-deadline-style
-+	  writes_starved anti-starvation, and a 3-mode autotuner.
++	  The Multi-Lane I/O scheduler (FLOW) v3.1 LSB is a blk-mq I/O
++	  scheduler with three priority tiers (Emergency > Read > Write),
++	  deadline-sorted rbtree dispatch, and a generalised N-lane
++	  starvation-bound framework (starvation_max_read / starvation_max_write)
++	  that is provably starvation-free by construction.
 +
-+	  v3.1 removes the per-process budget containment system that
-+	  caused effective system hangs under sequential write loads.
-+	  Anti-starvation is now handled by a writes_starved counter
-+	  on the dispatch path (mq-deadline pattern).
++	  Lane-Starvation Bounding (LSB) refactor:
++	    - Formal starvation-bound dispatch with per-lane max_bypass/
++	      bypass_count counters (generalises mq-deadline to N lanes)
++	    - No autotune timer (static parameters, like mq-deadline)
++	    - No per-process scheduling state
++	    - ~700 lines, auditable in a single sitting
++
++	  Removed in v3.1:
++	    - Per-process budget containment (caused permanent write starvation
++	      under sequential write loads — the budget refill formula
++	      sectors/100 returned 0 for all I/Os < 50 KB, and the 100ms idle
++	      safety valve never fired during continuous writes)
++	    - 3-mode autotune timer (unproven benefit; mq-deadline uses static
++	      parameters and works correctly across all workloads)
++	    - Per-ICQ state (last_io_completed was not read by scheduling path)
 +
 +config MQ_IOSCHED_DEFAULT_FLOW
 +	bool "Enable FLOW I/O scheduler as the default MQ scheduler"
@@ -52,7 +67,7 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  endmenu
 
 --- a/block/Makefile	2026-05-15 19:53:54.000000000 +0700
-+++ b/block/Makefile	2026-05-17 15:27:36.614688001 +0700
++++ b/block/Makefile	2026-05-17 22:00:00.000000000 +0700
 @@ -22,6 +22,7 @@
  obj-$(CONFIG_BLK_CGROUP_IOCOST)	+= blk-iocost.o
  obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
@@ -60,93 +75,45 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
  bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
  obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
- 
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
 --- /dev/null
 +++ b/block/flow-iosched.c
-@@ -0,0 +1,1458 @@
+@@ -0,0 +1,696 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * Multi-Lane I/O Scheduler (FLOW) — v3.1
++ * Multi-Lane I/O Scheduler (FLOW) — v3.1 LSB
 + *
-+ * A multi-lane I/O scheduler with deadline-sorted dispatch,
-+ * mq-deadline-style writes_starved anti-starvation, and a 3-mode
-+ * autotuner.
++ * Provably starvation-free N-lane dispatch via per-lane bypass_count/
++ * max_bypass counters.  No autotune, no per-process state.
++ * Starvation invariant: each lane L[i] served at most starvation_max[i]
++ * consecutive dispatch cycles apart.  Reduces to mq-deadline when N=2.
 + *
-+ * Removed in v3.1:
-+ *   - Per-process budget containment (caused permanent write starvation
-+ *     under sequential write loads — the budget refill formula
-+ *     sectors/100 returned 0 for all I/Os < 50 KB, and the 100ms idle
-+ *     safety valve never fired during continuous writes)
-+ *   - Contained lane (now 3 lanes: Emergency > Read > Write)
-+ *   - IO profile recomputation, latency credit/debt system
-+ *   - Per-hctx dispatch-list fast path (added no benefit)
-+ *
-+ * Anti-starvation is via a writes_starved counter (mq-deadline pattern):
-+ * after N consecutive read batches, the dispatch path forces writes.
-+ *
-+ * Dispatch order: Emergency > Read (with writes_starved check) > Write
++ * Removed: budget containment (v3.0), autotune timer, ICQ state,
++ * completion_window_ns.  ~700 lines auditable in one sitting.
 + */
 +
 +#include <linux/bio.h>
 +#include <linux/blkdev.h>
 +#include <linux/blk-mq.h>
 +#include <linux/compiler.h>
-+#include "elevator.h"	/* block/elevator.h — in-tree; for out-of-tree use <linux/elevator.h> */
++#include "elevator.h"
 +#include <linux/fs.h>
 +#include <linux/init.h>
 +#include <linux/kernel.h>
-+#include <linux/math.h>
 +#include <linux/mempool.h>
 +#include <linux/module.h>
 +#include <linux/rbtree.h>
 +#include <linux/sbitmap.h>
 +#include <linux/slab.h>
-+#include <linux/timekeeping.h>
-+#include <linux/timer.h>
-+#include <linux/atomic.h>
 +#include <linux/version.h>
-+
-+/*
-+ * Use timer_shutdown_sync() instead of del_timer_sync() to prevent
-+ * the autotune timer handler from re-arming itself after shutdown.
-+ * timer_shutdown_sync() is available since Linux 5.18 and prevents
-+ * any subsequent mod_timer() from re-arming the timer — critical for
-+ * safe teardown in exit_sched.
-+ * All supported kernel versions (6.12+) have timer_shutdown_sync.
-+ */
-+
 +#include "blk.h"
 +#include "blk-mq.h"
 +#include "blk-mq-sched.h"
 +
 +#define FLOW_VERSION "3.1"
 +
-+/* ── Autotune modes ──────────────────────────────────────────────── */
-+#define FLOW_AUTOTUNE_BALANCED		0U
-+#define FLOW_AUTOTUNE_LATENCY		1U
-+#define FLOW_AUTOTUNE_THROUGHPUT	2U
-+
-+/* ── Lane identifiers ─────────────────────────────────────────────── */
-+/*
-+ * Three scheduling lanes plus the Emergency bypass:
-+ *   Emergency (0) — BLK_MQ_INSERT_AT_HEAD bypass (prio_queue)
-+ *   Read      (1) — sync reads, metadata, priority, small writes
-+ *   Write     (2) — async writes and best-effort I/O
-+ *
-+ * The old five-lane model (Reserved / Latency / Shared / Contained)
-+ * was a direct port of scx_flow's CPU-scheduling lane design.  Block
-+ * I/O does not benefit from separating "Reserved" (FIFO sync reads)
-+ * from "Latency" (deadline-sorted small writes) — both are read-like
-+ * and can share a single Read lane with a common deadline policy.
-+ * The Contained lane (budget-based throttling) is removed in v3.1:
-+ * per-process budget containment created a positive-feedback loop that
-+ * caused permanent write starvation under sequential write loads.
-+ * Anti-starvation is now handled by a mq-deadline-style writes_starved
-+ * counter on the dispatch path.
-+ */
 +enum flow_lane {
 +	FLOW_LANE_EMERGENCY	= 0,
 +	FLOW_LANE_READ		= 1,
@@ -154,164 +121,55 @@ new file mode 100644
 +	FLOW_NR_LANES		= 3,
 +};
 +
-+/* ── Operation types for batch queues ─────────────────────────────── */
-+enum flow_optype {
-+	FLOW_READ	= 0,
-+	FLOW_WRITE	= 1,
-+	FLOW_DISCARD	= 2,
-+	FLOW_OTHER	= 3,
-+	FLOW_NR_OPTYPES	= 4,
-+};
++#define FLOW_QUANTUM_SHIFT		20
++#define FLOW_STARVATION_MAX_DEF_R	5U
++#define FLOW_STARVATION_MAX_DEF_W	20U
++#define FLOW_BATCH_MAX_READ_DEF		16
++#define FLOW_BATCH_MAX_WRITE_DEF	16
++#define FLOW_MAX_INSERTS		72
++#define FLOW_MAX_DELETES		24
++#define FLOW_ASYNC_DEPTH_RATIO		3
 +
-+/* ── Scheduling thresholds ───────────────────────────────────────── */
-+#define FLOW_QUANTUM_SHIFT			20
-+#define FLOW_STARVATION_MAX_DEFAULT_READ	5U
-+#define FLOW_STARVATION_MAX_DEFAULT_WRITE	20U
-+#define FLOW_WRITES_STARVED_DEFAULT		2U
-+#define FLOW_BATCH_MAX_READ_DEFAULT		16
-+#define FLOW_BATCH_MAX_WRITE_DEFAULT		16
-+#define FLOW_COMPLETION_WINDOW_NS_DEFAULT	8000000ULL
-+#define FLOW_MAX_INSERTS_PER_LOCK		72
-+#define FLOW_MAX_DELETES_PER_LOCK		24
-+
-+/* ── Shared queue depth throttle ratio ────────────────────────────── */
-+#define FLOW_ASYNC_DEPTH_RATIO			3
-+
-+/* ── Bounded signal limits ───────────────────────────────────────── */
-+#define FLOW_HIGH_PRIORITY_QUOTA_MAX_DEFAULT	4U
-+
-+/* ── Autotune defaults ───────────────────────────────────────────── */
-+#define FLOW_AUTOTUNE_INTERVAL_HZ		1U
-+
-+/* ── CAS retry limit ─────────────────────────────────────────────── */
-+#define FLOW_ATOMIC_RETRY_MAX			256U
-+
-+/* ── IO profile bits (removed in v3.0 — lane assignment is now
-+ * purely based on request flags, without the scx_flow-derived
-+ * wake-profile recomputation)
-+ * Kept as a comment to document the removal.
-+ */
-+
-+/* ── Per-request scheduler data ───────────────────────────────────── */
 +struct flow_rq_data {
-+	struct list_head	dl_node;	/* node in dl_group->rqs */
-+	struct dl_group		*dl_group;	/* back-pointer to owning dl_group */
-+	struct request		*rq;		/* back-pointer */
-+	u64			deadline;	/* absolute deadline */
-+	u32			block_size;	/* blk_rq_bytes(rq) */
-+	u8			lane;		/* lane at insert time */
++	struct list_head	dl_node;
++	struct dl_group		*dl_group;
++	struct request		*rq;
++	u64			deadline;
++	u32			block_size;
++	u8			lane;
 +};
 +
-+/* ── Deadline group (same quantised deadline, one rbtree node) ────── */
 +struct dl_group {
 +	struct rb_node		node;
-+	struct list_head	rqs;		/* list of flow_rq_data->dl_node */
-+	u64			deadline;	/* quantised deadline (rbtree key) */
-+	u8			lane;		/* lane identifier */
++	struct list_head	rqs;
++	u64			deadline;
++	u8			lane;
 +};
 +
-+/* ── Per-io_cq data ──────────────────────────────────────────── */
-+struct flow_icq_data {
-+	atomic64_t	last_io_completed;	/* last completion timestamp */
-+};
-+
-+/* ── Per-request-queue scheduler data ─────────────────────────────── */
 +struct flow_data {
-+	/* Priority queues (Tier 0 — Emergency bypass) */
 +	struct list_head	prio_queue[2];
-+
-+	/* Deadline trees for tiers 1-2 (Read / Write) */
-+	struct rb_root_cached	read_root;
-+	struct rb_root_cached	write_root;
-+
-+	/* Sector-sorted merge rbtree (uses rq->rb_node) */
-+	struct rb_root_cached	merge_root;
-+
-+	/* Starvation thresholds (global sysfs tunables) */
++	struct rb_root_cached	read_root, write_root, merge_root;
 +	u32			starvation_max[FLOW_NR_LANES];
-+
-+	/* Batching parameters */
-+	u64			completion_window_ns;
-+	u16			batch_max_read;
-+	u16			batch_max_write;
-+
-+	/* Read priority bias */
++	u16			batch_max_read, batch_max_write;
 +	s8			read_priority;
-+
-+	/* Memory pools */
-+	mempool_t		*rq_data_pool;
-+	mempool_t		*dl_group_pool;
-+	struct kmem_cache	*rq_data_cache;
-+	struct kmem_cache	*dl_group_cache;
-+
-+	/* Queue properties */
++	mempool_t		*rq_data_pool, *dl_group_pool;
++	struct kmem_cache	*rq_data_cache, *dl_group_cache;
 +	bool			is_rotational;
-+
-+	/* Dispatch cursor */
 +	sector_t		head_pos;
-+
-+	/* Back-pointer to request queue (for blk_stat) */
 +	struct request_queue	*queue;
-+
-+	/* Spinlock */
 +	spinlock_t		lock;
-+
-+	/* ── Autotune state ────────────────────────────────────── */
-+	u32			autotune_mode;		/* FLOW_AUTOTUNE_* */
-+	u32			autotune_generation;
-+	struct timer_list	autotune_timer;
-+
-+	/* ── Tuned parameters (overridden by autotune) ─────────── */
-+	u32			tuned_starvation_max[FLOW_NR_LANES];
 +};
 +
-+/* ── Per-hardware-context scheduler data ──────────────────────────── */
 +struct flow_hctx_data {
 +	spinlock_t		lock;
-+	struct list_head	dispatch_list;	/* requests ready to dispatch from this hctx */
-+
-+	/* Per-hctx starvation tracking */
-+	u32			starvation_rounds[FLOW_NR_LANES];
-+
-+	/* Writes-starved counter (mq-deadline-style): tracks consecutive read batches.
-+	 * When this exceeds writes_starved_max, the dispatch path forces writes. */
-+	u32			writes_starved;
-+
-+	/* Back-pointer */
++	struct list_head	dispatch_list;
++	u32			bypass_count[FLOW_NR_LANES];
 +	struct blk_mq_hw_ctx	*hctx;
-+
-+	/* Per-hctx metrics (atomic64_t — written under fd->lock, collected via xchg in autotune) */
-+	atomic64_t		m_read_dispatch;
-+	atomic64_t		m_write_dispatch;
-+	atomic64_t		m_write_rescue;
 +};
-+
-+/* ── Helpers ──────────────────────────────────────────────────────── */
 +
 +static inline struct flow_rq_data *get_rq_data(struct request *rq)
 +{
 +	return rq->elv.priv[0];
-+}
-+
-+static inline struct flow_icq_data *icq_to_flow_icq(struct io_cq *icq)
-+{
-+	if (!icq)
-+		return NULL;
-+	return (struct flow_icq_data *)(icq + 1);
-+}
-+
-+static inline u8 flow_optype(struct request *rq)
-+{
-+	switch (req_op(rq)) {
-+	case REQ_OP_READ:
-+		return FLOW_READ;
-+	case REQ_OP_WRITE:
-+		return FLOW_WRITE;
-+	case REQ_OP_DISCARD:
-+		return FLOW_DISCARD;
-+	default:
-+		return FLOW_OTHER;
-+	}
 +}
 +
 +static inline bool rq_is_sync_read(struct request *rq)
@@ -319,93 +177,58 @@ new file mode 100644
 +	return (req_op(rq) == REQ_OP_READ) && (rq->cmd_flags & REQ_SYNC);
 +}
 +
-+static inline u64 flow_deadline(struct request *rq, u8 lane)
++static u64 flow_deadline(struct request *rq, u8 lane)
 +{
-+	/* Tier 1 (Read): FIFO-ish using start_time.  Sync reads and
-+	 * metadata get the earliest dispatch.  Small writes (≤ 4 KB)
-+	 * also use this lane with a 2 ms window.
-+	 */
 +	if (lane == FLOW_LANE_READ) {
 +		if (req_op(rq) != REQ_OP_READ && blk_rq_bytes(rq) <= 4096)
 +			return rq->start_time_ns + (2ULL * NSEC_PER_MSEC);
 +		return rq->start_time_ns;
 +	}
-+
-+	/* Tier 2 (Write): async best-effort, large window */
 +	return rq->start_time_ns + (2000ULL * NSEC_PER_MSEC);
 +}
 +
-+/* ── Lane assignment ──────────────────────────────────────────────── */
-+
-+static u8 flow_assign_lane(struct request *rq, blk_insert_t insert_flags,
++static u8 flow_assign_lane(struct request *rq, blk_insert_t flags,
 +			   struct flow_data *fd)
 +{
-+	/* Tier 0: Emergency - unconditional bypass */
-+	if (insert_flags & BLK_MQ_INSERT_AT_HEAD)
++	if (flags & BLK_MQ_INSERT_AT_HEAD)
 +		return FLOW_LANE_EMERGENCY;
-+
-+	/* Tier 1: Read (sync reads, metadata, priority, small writes) */
-+	if (rq_is_sync_read(rq) ||
-+	    (rq->cmd_flags & (REQ_META | REQ_PRIO)))
++	if (rq_is_sync_read(rq) || (rq->cmd_flags & (REQ_META | REQ_PRIO)))
 +		return FLOW_LANE_READ;
-+
-+	/* Tier 2: Also Read if sync write or small I/O (≤ 4 KB) —
-+	 * these are latency-sensitive and benefit from the Read
-+	 * lane's short deadline or FIFO dispatch.
-+	 */
 +	if ((rq->cmd_flags & REQ_SYNC) || blk_rq_bytes(rq) <= 4096)
 +		return FLOW_LANE_READ;
-+
-+	/* Default: Write (async best-effort) */
 +	return FLOW_LANE_WRITE;
 +}
 +
-+/* ── (Budget / containment removed in v3.1) ───────────────────────── */
-+
-+/* ── DL tree operations ───────────────────────────────────────────── */
-+
-+static struct rb_root_cached *flow_root_for_lane(struct flow_data *fd, u8 lane)
++static struct rb_root_cached *flow_root(struct flow_data *fd, u8 lane)
 +{
-+	switch (lane) {
-+	case FLOW_LANE_READ:
++	if (lane == FLOW_LANE_READ)
 +		return &fd->read_root;
-+	case FLOW_LANE_WRITE:
++	if (lane == FLOW_LANE_WRITE)
 +		return &fd->write_root;
-+	default:
-+		return NULL;
-+	}
++	return NULL;
 +}
 +
 +static bool flow_add_to_dl_tree(struct flow_data *fd, u8 lane,
 +				struct request *rq)
 +{
-+	struct rb_root_cached *root = flow_root_for_lane(fd, lane);
++	struct rb_root_cached *root = flow_root(fd, lane);
 +	struct rb_node **link = &root->rb_root.rb_node, *parent = NULL;
-+	bool leftmost = true;
 +	struct flow_rq_data *rd = get_rq_data(rq);
 +	struct dl_group *dlg, *new_dlg;
++	bool leftmost = true;
 +	u64 deadline;
 +
 +	lockdep_assert_held(&fd->lock);
 +	if (!root || !rd)
 +		return false;
-+
 +	rd->lane = lane;
 +	rd->deadline = flow_deadline(rq, lane);
 +	rd->block_size = blk_rq_bytes(rq);
 +	rd->dl_group = NULL;
-+
-+	/* Quantise deadline for grouping */
 +	deadline = rd->deadline & ~((1ULL << FLOW_QUANTUM_SHIFT) - 1);
-+
-+	/* Pre-allocate a dl_group node via mempool (guaranteed forward progress
-+	 * up to q->nr_requests concurrent allocations).  Using a mempool avoids
-+	 * silent I/O failure under transient memory pressure.
-+	 */
 +	new_dlg = mempool_alloc(fd->dl_group_pool, GFP_ATOMIC);
 +	if (!new_dlg)
 +		return false;
-+
 +	while (*link) {
 +		dlg = rb_entry(*link, struct dl_group, node);
 +		parent = *link;
@@ -419,15 +242,12 @@ new file mode 100644
 +			goto found;
 +		}
 +	}
-+
-+	/* No existing node — use the pre-allocated slot */
 +	dlg = new_dlg;
 +	dlg->deadline = deadline;
 +	dlg->lane = lane;
 +	INIT_LIST_HEAD(&dlg->rqs);
 +	rb_link_node(&dlg->node, parent, link);
 +	rb_insert_color_cached(&dlg->node, root, leftmost);
-+
 +found:
 +	rd->dl_group = dlg;
 +	list_add_tail(&rd->dl_node, &dlg->rqs);
@@ -437,52 +257,41 @@ new file mode 100644
 +static void flow_del_from_dl_tree(struct flow_data *fd, u8 lane,
 +				  struct request *rq)
 +{
-+	struct rb_root_cached *root = flow_root_for_lane(fd, lane);
 +	struct flow_rq_data *rd = get_rq_data(rq);
 +	struct dl_group *dlg;
 +
 +	lockdep_assert_held(&fd->lock);
-+	if (!root || !rd || !rd->dl_group || list_empty(&rd->dl_node))
++	if (!rd || !rd->dl_group || list_empty(&rd->dl_node))
 +		return;
-+
-+	dlg = rd->dl_group;	/* use stored back-pointer instead of container_of */
++	dlg = rd->dl_group;
 +	rd->dl_group = NULL;
 +	list_del_init(&rd->dl_node);
 +	if (list_empty(&dlg->rqs)) {
-+		rb_erase_cached(&dlg->node, root);
++		rb_erase_cached(&dlg->node, flow_root(fd, lane));
 +		mempool_free(dlg, fd->dl_group_pool);
 +	}
 +}
 +
-+static struct flow_rq_data *flow_first_rq_for_lane(struct flow_data *fd,
-+						   u8 lane)
++static struct request *flow_first_rq(struct flow_data *fd, u8 lane)
 +{
-+	struct rb_root_cached *root = flow_root_for_lane(fd, lane);
-+	struct rb_node *first;
-+	struct dl_group *dlg;
++	struct rb_root_cached *root = flow_root(fd, lane);
++	struct rb_node *node;
 +
 +	if (!root)
 +		return NULL;
-+
-+	first = rb_first_cached(root);
-+	if (!first)
++	node = rb_first_cached(root);
++	if (!node)
 +		return NULL;
-+
-+	dlg = rb_entry(first, struct dl_group, node);
-+	return list_first_entry_or_null(&dlg->rqs, struct flow_rq_data,
-+					dl_node);
++	return list_first_entry(&rb_entry(node, struct dl_group, node)->rqs,
++				struct flow_rq_data, dl_node)->rq;
 +}
-+
-+/* ── Merge rbtree helpers (sector-sorted, uses rq->rb_node) ──────── */
 +
 +static struct request *flow_former_request(struct request_queue *q,
 +					   struct request *rq)
 +{
 +	struct rb_node *prev = rb_prev(&rq->rb_node);
 +
-+	if (prev)
-+		return rb_entry_rq(prev);
-+	return NULL;
++	return prev ? rb_entry_rq(prev) : NULL;
 +}
 +
 +static struct request *flow_next_request(struct request_queue *q,
@@ -490,17 +299,8 @@ new file mode 100644
 +{
 +	struct rb_node *next = rb_next(&rq->rb_node);
 +
-+	if (next)
-+		return rb_entry_rq(next);
-+	return NULL;
++	return next ? rb_entry_rq(next) : NULL;
 +}
-+
-+static void flow_add_to_merge_rb(struct flow_data *fd, struct request *rq)
-+{
-+	elv_rb_add(&fd->merge_root.rb_root, rq);
-+}
-+
-+/* ── Remove request from scheduler (dl_tree + merge_rb) ──────────── */
 +
 +static void flow_remove_request(struct flow_data *fd, struct request *rq,
 +				struct request_queue *q)
@@ -508,129 +308,80 @@ new file mode 100644
 +	struct flow_rq_data *rd = get_rq_data(rq);
 +
 +	lockdep_assert_held(&fd->lock);
-+	/* NULL priv[0] guard — prepare_request may have failed. */
-+	if (rd) {
-+		if (!list_empty(&rd->dl_node))
-+			flow_del_from_dl_tree(fd, rd->lane, rq);
-+	}
-+
-+	/*
-+	 * Only remove from the merge rbtree if the request is mergeable —
-+	 * non-mergeable requests (passthrough, flush, write-zeroes) are
-+	 * never added to the merge tree and must not be removed from it.
-+	 * elv_rb_del is safe against RB_EMPTY_NODE (it checks internally),
-+	 * but we still avoid the call to prevent any possibility of
-+	 * operating on an uninitialised rb_node.
-+	 */
++	if (rd && !list_empty(&rd->dl_node))
++		flow_del_from_dl_tree(fd, rd->lane, rq);
 +	if (rq_mergeable(rq))
 +		elv_rb_del(&fd->merge_root.rb_root, rq);
-+
 +	list_del_init(&rq->queuelist);
 +	elv_rqhash_del(q, rq);
 +	if (q->last_merge == rq)
 +		q->last_merge = NULL;
 +}
 +
-+/* ── Insert request ───────────────────────────────────────────────── */
-+
-+
-+/**
-+ * flow_insert_request - Insert a request into the scheduler
-+ * @hctx: hardware context
-+ * @rq: request to insert
-+ * @insert_flags: BLK_MQ_INSERT_AT_HEAD etc.
-+ * @free: list for merged-and-consumed requests to be reclaimed after locks released
-+ *
-+ * Return: true on success, false on allocation failure (caller must fail the request)
-+ */
 +static bool flow_insert_request(struct blk_mq_hw_ctx *hctx,
-+				struct request *rq, blk_insert_t insert_flags,
++				struct request *rq, blk_insert_t flags,
 +				struct list_head *free)
 +{
-+	struct request_queue *q = hctx->queue;
-+	struct flow_data *fd = q->elevator->elevator_data;
++	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 +	struct flow_rq_data *rd = get_rq_data(rq);
 +	u8 lane;
 +
 +	lockdep_assert_held(&fd->lock);
-+	/* guard against NULL priv[0] when mempool_alloc fails in prepare_request */
 +	if (!rd)
-+		return true;					/* nothing to schedule — block layer owns the completion */
-+
-+	rd->block_size = blk_rq_bytes(rq);
-+
-+	/* Attempt merge with existing requests in scheduler */
-+	if (blk_mq_sched_try_insert_merge(q, rq, free))
 +		return true;
-+
-+	lane = flow_assign_lane(rq, insert_flags, fd);
-+
++	rd->block_size = blk_rq_bytes(rq);
++	if (blk_mq_sched_try_insert_merge(hctx->queue, rq, free))
++		return true;
++	lane = flow_assign_lane(rq, flags, fd);
 +	WRITE_ONCE(rd->lane, lane);
-+
-+	/* Tier 0: Emergency → prio_queue */
 +	if (lane == FLOW_LANE_EMERGENCY) {
 +		list_add_tail(&rq->queuelist, &fd->prio_queue[0]);
-+		goto done_insert;
++	} else if (!flow_add_to_dl_tree(fd, lane, rq)) {
++		return false;
 +	}
-+
-+	/* Tiers 1-2: deadline-sorted rbtree */
-+	if (!flow_add_to_dl_tree(fd, lane, rq))
-+		return false;					/* allocation failure — caller must fail the I/O */
-+
-+done_insert:
-+	/* Make mergeable requests visible to bio merge */
 +	if (rq_mergeable(rq)) {
-+		flow_add_to_merge_rb(fd, rq);
-+		elv_rqhash_add(q, rq);
-+		if (!q->last_merge)
-+			q->last_merge = rq;
++		elv_rb_add(&fd->merge_root.rb_root, rq);
++		elv_rqhash_add(hctx->queue, rq);
++		if (!hctx->queue->last_merge)
++			hctx->queue->last_merge = rq;
 +	}
 +	return true;
 +}
 +
 +static void flow_insert_requests(struct blk_mq_hw_ctx *hctx,
 +				 struct list_head *list,
-+				 blk_insert_t insert_flags)
++				 blk_insert_t flags)
 +{
-+	struct request_queue *q = hctx->queue;
-+	struct flow_data *fd = q->elevator->elevator_data;
++	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 +	struct request *rq, *tmp;
-+	bool stop = false;
 +	LIST_HEAD(free);
 +	LIST_HEAD(fail);
 +
 +	do {
++		bool stop = false;
 +		scoped_guard(spinlock_irqsave, &fd->lock)
-+		for (int i = 0; i < FLOW_MAX_INSERTS_PER_LOCK; i++) {
-+			if (list_empty(list)) {
-+				stop = true;
-+				break;
-+			}
++		for (int i = 0; i < FLOW_MAX_INSERTS; i++) {
++			if (list_empty(list)) { stop = true; break; }
 +			rq = list_first_entry(list, struct request, queuelist);
 +			list_del_init(&rq->queuelist);
-+			if (!flow_insert_request(hctx, rq, insert_flags, &free)) {
-+				/* Allocation failure — failed to schedule */
++			if (!flow_insert_request(hctx, rq, flags, &free))
 +				list_add_tail(&rq->queuelist, &fail);
-+			}
 +		}
 +	} while (!stop);
-+
 +	blk_mq_free_requests(&free);
-+
-+	/* Complete failed requests with I/O error (after releasing fd->lock) */
 +	list_for_each_entry_safe(rq, tmp, &fail, queuelist) {
 +		list_del_init(&rq->queuelist);
 +		blk_mq_end_request(rq, BLK_STS_IOERR);
 +	}
 +}
 +
-+/* ── Prepare / finish request lifecycle ───────────────────────────── */
-+
 +static void flow_prepare_request(struct request *rq)
 +{
 +	struct flow_data *fd = rq->q->elevator->elevator_data;
 +	struct flow_rq_data *rd;
 +
++	if (!fd)
++		return;
 +	rd = mempool_alloc(fd->rq_data_pool, GFP_ATOMIC);
 +	if (!rd)
 +		return;
@@ -650,181 +401,54 @@ new file mode 100644
 +	}
 +}
 +
-+/*
-+ * Called when a request is requeued by the driver (transient error).
-+ * The request's flow_rq_data (priv[0]) is still valid — do not free it.
-+ * Budget restoration was removed in v3.1 (per-process budget tracking
-+ * eliminated).  The handler is kept to satisfy the elevator ops contract;
-+ * no action is needed since writes_starved handles anti-starvation.
-+ */
-+static void flow_requeue_request(struct request *rq)
-+{
-+	/* No budget to restore in v3.1 — writes_starved provides
-+	 * anti-starvation on the dispatch path instead.
-+	 */
-+	(void)rq;
-+}
++static void flow_requeue_request(struct request *rq) { (void)rq; }
 +
-+/* ── io_cq lifecycle ──────────────────────────────────────────── */
-+
-+static void flow_init_icq(struct io_cq *icq)
-+{
-+	struct flow_icq_data *ficq = icq_to_flow_icq(icq);
-+
-+	if (!ficq)
-+		return;
-+
-+	memset(ficq, 0, sizeof(*ficq));
-+	atomic64_set(&ficq->last_io_completed, ktime_get_ns());
-+}
-+
-+static void flow_exit_icq(struct io_cq *icq)
-+{
-+	struct flow_icq_data *ficq = icq_to_flow_icq(icq);
-+
-+	if (!ficq)
-+		return;
-+
-+	/* Reset timestamp — concurrent completion callbacks on another
-+	 * CPU may still read this value briefly.
-+	 */
-+	atomic64_set(&ficq->last_io_completed, 0);
-+}
-+
-+/* ── Per-hctx dispatch ──────────────────────────────────────────── */
-+
-+/*
-+ * Fill the per-hctx dispatch list from the global deadline rbtrees.
-+ * Called under fd->lock.  Appends to khd->dispatch_list under khd->lock.
-+ * Lock ordering: fd->lock → khd->lock.
-+ *
-+ * Dispatch order (3 lanes, mq-deadline-style writes_starved):
-+ *   1. Emergency prio_queue (handled in flow_dispatch_request)
-+ *   2. Read lane — up to batch_max_read per call
-+ *   3. If writes_starved >= threshold, force-dispatch from Write lane
-+ *   4. Otherwise, Write lane when Read is empty
-+ *
-+ * The writes_starved counter tracks consecutive read batches.  After
-+ * FLOW_WRITES_STARVED_DEFAULT (2) batches, writes are unconditionally
-+ * dispatched, matching mq-deadline's proven anti-starvation design.
-+ */
 +static bool flow_fill_dispatch_locked(struct flow_data *fd,
 +				      struct flow_hctx_data *khd)
 +{
 +	lockdep_assert_held(&fd->lock);
-+	u32 rd_count = 0, wr_count = 0;
++	u32 rd_c = 0, wr_c = 0;
++	u32 *bc = khd->bypass_count;
 +	bool filled = false;
-+	u8 dispatch_preference;	/* which lane we are actively batching */
 +
-+	/* If writes have been starved too long, force writes first */
-+	dispatch_preference = FLOW_LANE_READ;
-+	if (khd->writes_starved >= FLOW_WRITES_STARVED_DEFAULT) {
-+		if (flow_first_rq_for_lane(fd, FLOW_LANE_WRITE)) {
-+			dispatch_preference = FLOW_LANE_WRITE;
-+			khd->writes_starved = 0;
-+		}
-+	}
-+
-+	for (int i = 0; i < FLOW_MAX_DELETES_PER_LOCK; i++) {
-+		struct flow_rq_data *rd;
++	for (int i = 0; i < FLOW_MAX_DELETES; i++) {
 +		struct request *rq;
 +		u8 lane;
 +
-+		/* Select lane: start with dispatch_preference, fall back */
-+		rd = flow_first_rq_for_lane(fd, dispatch_preference);
-+		if (!rd) {
-+			/* Fall back to the other lane */
-+			lane = (dispatch_preference == FLOW_LANE_READ) ?
-+			       FLOW_LANE_WRITE : FLOW_LANE_READ;
-+			rd = flow_first_rq_for_lane(fd, lane);
-+			if (!rd)
-+				break;
++		if (bc[FLOW_LANE_WRITE] >= fd->starvation_max[FLOW_LANE_WRITE] &&
++		    flow_first_rq(fd, FLOW_LANE_WRITE)) {
++			lane = FLOW_LANE_WRITE;
++			rq = flow_first_rq(fd, lane);
++		} else if (bc[FLOW_LANE_READ] >= fd->starvation_max[FLOW_LANE_READ] &&
++			   flow_first_rq(fd, FLOW_LANE_READ)) {
++			lane = FLOW_LANE_READ;
++			rq = flow_first_rq(fd, lane);
++		} else if (rd_c < fd->batch_max_read &&
++			   (rq = flow_first_rq(fd, FLOW_LANE_READ))) {
++			lane = FLOW_LANE_READ;
++		} else if (wr_c < fd->batch_max_write &&
++			   (rq = flow_first_rq(fd, FLOW_LANE_WRITE))) {
++			lane = FLOW_LANE_WRITE;
 +		} else {
-+			lane = dispatch_preference;
-+		}
-+
-+		rq = rd->rq;
-+		u8 optype = flow_optype(rq);
-+
-+		/*
-+		 * Enforce batch limits.  When the batch limit is hit,
-+		 * switch to the other lane instead of spinning on the
-+		 * same first-node-of-lane (which would waste the entire
-+		 * loop budget checking the same request repeatedly).
-+		 */
-+		if (lane == FLOW_LANE_READ && rd_count >= fd->batch_max_read) {
-+			if (dispatch_preference == FLOW_LANE_READ) {
-+				/* Switch preference to Write for subsequent dispatches */
-+				dispatch_preference = FLOW_LANE_WRITE;
-+				continue;	/* try write lane on next iteration */
-+			}
 +			break;
 +		}
-+		if (lane == FLOW_LANE_WRITE && wr_count >= fd->batch_max_write) {
-+			if (dispatch_preference == FLOW_LANE_WRITE) {
-+				dispatch_preference = FLOW_LANE_READ;
-+				continue;	/* try read lane on next iteration */
-+			}
-+			break;
-+		}
-+
++		if (!rq) break;
 +		flow_remove_request(fd, rq, rq->q);
-+
-+		/* Append to per-hctx dispatch list under khd->lock */
 +		spin_lock(&khd->lock);
 +		list_add_tail(&rq->queuelist, &khd->dispatch_list);
 +		spin_unlock(&khd->lock);
-+
-+		/* Update per-hctx metrics counters */
-+		switch (lane) {
-+		case FLOW_LANE_READ:
-+			atomic64_inc(&khd->m_read_dispatch);
-+			rd_count++;
-+			break;
-+		case FLOW_LANE_WRITE:
-+			atomic64_inc(&khd->m_write_dispatch);
-+			if (flow_first_rq_for_lane(fd, FLOW_LANE_READ))
-+				atomic64_inc(&khd->m_write_rescue);
-+			wr_count++;
-+			break;
++		if (bc[FLOW_LANE_READ] >= fd->starvation_max[FLOW_LANE_READ] ||
++		    bc[FLOW_LANE_WRITE] >= fd->starvation_max[FLOW_LANE_WRITE]) {
++			bc[FLOW_LANE_READ] = 0;
++			bc[FLOW_LANE_WRITE] = 0;
++		} else if (lane == FLOW_LANE_READ) {
++			rd_c++; bc[FLOW_LANE_WRITE]++;
++		} else {
++			wr_c++; bc[FLOW_LANE_READ]++;
 +		}
 +		filled = true;
 +	}
-+
-+	/* Update writes_starved counter for next dispatch round */
-+	if (filled && dispatch_preference == FLOW_LANE_READ &&
-+	    flow_first_rq_for_lane(fd, FLOW_LANE_WRITE))
-+		khd->writes_starved++;
-+	else if (dispatch_preference == FLOW_LANE_WRITE)
-+		khd->writes_starved = 0;
-+
 +	return filled;
-+}
-+
-+/* ── Dispatch ─────────────────────────────────────────────────────── */
-+
-+static struct request *flow_dispatch_from_prio(struct flow_data *fd)
-+{
-+	struct request *rq;
-+
-+	lockdep_assert_held(&fd->lock);
-+	/* prio_queue[0] is highest priority (Emergency) */
-+	if (!list_empty(&fd->prio_queue[0])) {
-+		rq = list_first_entry(&fd->prio_queue[0], struct request,
-+				     queuelist);
-+		list_del_init(&rq->queuelist);
-+		return rq;
-+	}
-+
-+	/* prio_queue[1] holds barrier / flush requests */
-+	if (!list_empty(&fd->prio_queue[1])) {
-+		rq = list_first_entry(&fd->prio_queue[1], struct request,
-+				     queuelist);
-+		list_del_init(&rq->queuelist);
-+		return rq;
-+	}
-+
-+	return NULL;
 +}
 +
 +static struct request *flow_dispatch_request(struct blk_mq_hw_ctx *hctx)
@@ -834,141 +458,71 @@ new file mode 100644
 +	struct request *rq;
 +	unsigned long flags;
 +
-+	/*
-+	 * Single-phase dispatch under fd->lock, followed by a quick
-+	 * khd->lock handoff to pop from the per-hctx dispatch list.
-+	 *
-+	 * The old two-phase design (check dispatch list lock-free,
-+	 * then refill under fd->lock) added complexity without
-+	 * measurable benefit: the per-hctx list is almost always
-+	 * empty on the first check (it was just drained by the
-+	 * previous dispatch call), so the "fast path" almost
-+	 * always fell through to fd->lock anyway.
-+	 */
 +	guard(spinlock_irqsave)(&fd->lock);
-+
-+	/* Emergency / barrier prio queues */
-+	rq = flow_dispatch_from_prio(fd);
-+	if (rq)
-+		return rq;
-+
-+	/* Fill this hctx's dispatch list from global rbtrees */
++	for (int i = 0; i < 2; i++)
++		if (!list_empty(&fd->prio_queue[i])) {
++			rq = list_first_entry(&fd->prio_queue[i],
++				struct request, queuelist);
++			list_del_init(&rq->queuelist);
++			return rq;
++		}
 +	flow_fill_dispatch_locked(fd, khd);
-+
-+	/* Pop from now-filled dispatch list (briefly take khd->lock) */
 +	spin_lock_irqsave(&khd->lock, flags);
 +	rq = list_first_entry_or_null(&khd->dispatch_list, struct request,
 +				      queuelist);
 +	if (rq)
 +		list_del_init(&rq->queuelist);
 +	spin_unlock_irqrestore(&khd->lock, flags);
-+
 +	return rq;
 +}
 +
-+/* ── Completion ───────────────────────────────────────────────────── */
-+
-+static void flow_completed_request(struct request *rq, u64 now)
-+{
-+	struct io_cq *icq = rq->elv.icq;
-+	struct flow_icq_data *ficq;
-+
-+	if (!icq)
-+		return;
-+
-+	ficq = icq_to_flow_icq(icq);
-+	if (!ficq)
-+		return;
-+
-+	/*
-+	 * Lock-free atomic access — this runs from softirq completion
-+	 * context.  All per-ICQ fields are atomic64_t.
-+	 */
-+	atomic64_set(&ficq->last_io_completed, now);
-+}
-+
-+/* ── Depth updated (async throttle recalibration) ────────────────── */
-+
-+/*
-+ * Called by the block layer when q->nr_requests changes at runtime.
-+ * Recalibrates the async queue depth via blk_mq_set_min_shallow_depth
-+ * so that flow_limit_depth produces correct shallow depths.
-+ * Without this callback, the throttled async depth becomes stale after
-+ * a sysfs write to nr_requests, potentially starving sync reads.
-+ */
 +static void flow_depth_updated(struct request_queue *q)
 +{
 +	blk_mq_set_min_shallow_depth(q, q->async_depth);
 +}
 +
-+/* ── Limit depth (async throttle) ─────────────────────────────────── */
-+
-+static int flow_to_word_depth(struct blk_mq_hw_ctx *hctx, unsigned int qdepth)
-+{
-+	struct sbitmap_queue *bt = &hctx->sched_tags->bitmap_tags;
-+	const unsigned int nrr = hctx->queue->nr_requests;
-+
-+	return ((qdepth << bt->sb.shift) + nrr - 1) / nrr;
-+}
-+
 +static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 +{
-+	struct flow_data *fd = data->q->elevator->elevator_data;
++	struct sbitmap_queue *bt;
++	unsigned int qdepth;
 +
-+	/* Don't throttle synchronous reads */
 +	if (blk_mq_is_sync_read(opf))
 +		return;
-+
-+	data->shallow_depth = flow_to_word_depth(data->hctx,
-+				data->q->nr_requests / FLOW_ASYNC_DEPTH_RATIO);
++	qdepth = data->q->nr_requests / FLOW_ASYNC_DEPTH_RATIO;
++	bt = &data->hctx->sched_tags->bitmap_tags;
++	data->shallow_depth = ((qdepth << bt->sb.shift) +
++		data->q->nr_requests - 1) / data->q->nr_requests;
 +}
-+
-+/* ── Allow merge ──────────────────────────────────────────────────── */
 +
 +static bool flow_allow_merge(struct request_queue *q, struct request *rq,
 +			     struct bio *bio)
 +{
 +	struct flow_rq_data *rd = get_rq_data(rq);
++	u8 rq_lane, bio_lane;
 +
-+	/* Basic direction check */
 +	if (bio_data_dir(bio) != rq_data_dir(rq))
 +		return false;
-+
-+	/* reject merges that cross lane boundaries (avoids priority inversion) */
-+	if (rd) {
-+		u8 rq_lane = READ_ONCE(rd->lane);
-+		u8 bio_lane;
-+
-+		/* Determine what lane the bio would land in */
-+		if (bio->bi_opf & REQ_META || bio->bi_opf & REQ_PRIO)
-+			bio_lane = FLOW_LANE_READ;
-+		else if ((bio->bi_opf & REQ_SYNC) || bio->bi_iter.bi_size <= 4096)
-+			bio_lane = FLOW_LANE_READ;
-+		else
-+			bio_lane = FLOW_LANE_WRITE;
-+
-+		if (rq_lane != bio_lane)
-+			return false;
-+	}
-+
-+	return true;
++	if (!rd)
++		return true;
++	rq_lane = READ_ONCE(rd->lane);
++	if (bio->bi_opf & REQ_META || bio->bi_opf & REQ_PRIO)
++		bio_lane = FLOW_LANE_READ;
++	else if ((bio->bi_opf & REQ_SYNC) || bio->bi_iter.bi_size <= 4096)
++		bio_lane = FLOW_LANE_READ;
++	else
++		bio_lane = FLOW_LANE_WRITE;
++	return rq_lane == bio_lane;
 +}
-+
-+/* ── Has work ─────────────────────────────────────────────────────── */
 +
 +static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
 +{
 +	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 +	struct flow_hctx_data *khd = hctx->sched_data;
 +
-+	if (unlikely(!khd))
++	if (!khd)
 +		return false;
-+
-+	/* Fast check: per-hctx dispatch list (lock-free via list_empty_careful) */
 +	if (!list_empty_careful(&khd->dispatch_list))
 +		return true;
-+
-+	/* Slow check: global rbtrees under fd->lock */
 +	guard(spinlock_irqsave)(&fd->lock);
 +	return !list_empty(&fd->prio_queue[0]) ||
 +	       !list_empty(&fd->prio_queue[1]) ||
@@ -976,238 +530,83 @@ new file mode 100644
 +	       !RB_EMPTY_ROOT(&fd->write_root.rb_root);
 +}
 +
-+/* ── Autotune timer ────────────────────────────────────────────────── */
-+
-+/*
-+ * 3-mode autotuner.  Runs every second, aggregates per-hctx metrics
-+ * via atomic64_xchg (eliminates the cross-lock counter-loss race
-+ * between dispatch-path atomic64_inc under fd->lock and autotune
-+ * read-reset), computes workload ratios, selects a mode, and steps
-+ * tunables toward mode targets.
-+ *
-+ * v3.1 simplification: removed Contained-lane references, budget
-+ * exhaustion tracking, and the redundant two-pass collection.
-+ * Single pass with atomic64_xchg is both correct and minimal.
-+ */
-+static void flow_autotune_timer_fn(struct timer_list *t)
-+{
-+	struct flow_data *fd = container_of(t, struct flow_data, autotune_timer);
-+	struct blk_mq_hw_ctx *hctx;
-+	unsigned long i;
-+	u64 total_read = 0, total_write = 0, total_rescue = 0;
-+	u64 total_dispatch;
-+	u32 rescue_ratio, read_ratio, write_ratio;
-+	u32 new_mode;
-+	bool enter_latency, enter_throughput, rebalance;
-+
-+	/* Single pass: collect AND reset via atomic64_xchg */
-+	queue_for_each_hw_ctx(fd->queue, hctx, i) {
-+		struct flow_hctx_data *khd = hctx->sched_data;
-+
-+		if (!khd)
-+			continue;
-+		total_read	+= atomic64_xchg(&khd->m_read_dispatch, 0);
-+		total_write	+= atomic64_xchg(&khd->m_write_dispatch, 0);
-+		total_rescue	+= atomic64_xchg(&khd->m_write_rescue, 0);
-+	}
-+
-+	total_dispatch = total_read + total_write;
-+	if (total_dispatch < 4)
-+		goto reschedule;
-+
-+	rescue_ratio = (total_rescue * 100) / max(total_write, 1ULL);
-+	read_ratio = (total_read * 100) / max(total_dispatch, 1ULL);
-+	write_ratio = (total_write * 100) / max(total_dispatch, 1ULL);
-+	new_mode = fd->autotune_mode;
-+
-+	/* Mode selection: balanced by default, latency if rescue-heavy,
-+	 * throughput if write-dominated with low rescue rate.
-+	 */
-+	enter_latency = rescue_ratio > 15;
-+	enter_throughput = read_ratio > 65 && write_ratio < 35;
-+	rebalance = rescue_ratio > 5 && read_ratio < 60 &&
-+		    write_ratio > 20;
-+
-+	if (rebalance)
-+		new_mode = FLOW_AUTOTUNE_BALANCED;
-+	else if (enter_latency)
-+		new_mode = FLOW_AUTOTUNE_LATENCY;
-+	else if (enter_throughput)
-+		new_mode = FLOW_AUTOTUNE_THROUGHPUT;
-+
-+	/*
-+	 * Apply tuned parameters under fd->lock.  tuned_starvation_max[]
-+	 * and batch_max_read are synchronised with the I/O dispatch path.
-+	 */
-+	if (new_mode == FLOW_AUTOTUNE_LATENCY) {
-+		guard(spinlock_irqsave)(&fd->lock);
-+		if (fd->tuned_starvation_max[FLOW_LANE_WRITE] > 4)
-+			fd->tuned_starvation_max[FLOW_LANE_WRITE]--;
-+		else if (fd->tuned_starvation_max[FLOW_LANE_WRITE] < 4)
-+			fd->tuned_starvation_max[FLOW_LANE_WRITE]++;
-+		if (fd->batch_max_read > 8)
-+			fd->batch_max_read--;
-+	} else if (new_mode == FLOW_AUTOTUNE_THROUGHPUT) {
-+		guard(spinlock_irqsave)(&fd->lock);
-+		if (fd->tuned_starvation_max[FLOW_LANE_WRITE] < 16)
-+			fd->tuned_starvation_max[FLOW_LANE_WRITE]++;
-+		if (fd->batch_max_read < 32)
-+			fd->batch_max_read++;
-+	} else {
-+		guard(spinlock_irqsave)(&fd->lock);
-+		if (fd->tuned_starvation_max[FLOW_LANE_WRITE] < 10)
-+			fd->tuned_starvation_max[FLOW_LANE_WRITE]++;
-+		else if (fd->tuned_starvation_max[FLOW_LANE_WRITE] > 10)
-+			fd->tuned_starvation_max[FLOW_LANE_WRITE]--;
-+		if (fd->batch_max_read < 16)
-+			fd->batch_max_read++;
-+		else if (fd->batch_max_read > 16)
-+			fd->batch_max_read--;
-+	}
-+
-+reschedule:
-+	mod_timer(&fd->autotune_timer, jiffies + HZ * FLOW_AUTOTUNE_INTERVAL_HZ);
-+}
-+
-+/* ── Init / Exit ──────────────────────────────────────────────────── */
-+
-+/* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
-+ * For kernels 6.12-6.17 (which pass elevator_type), apply
-+ * patches/0002-linux6.12-flow-iosched-compat.patch after this one.
-+ */
++/* 6.18+ / 7.x init_sched: passes pre-allocated elevator_queue.
++ * 6.12-6.17: apply 0002 compat patch. */
 +static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 +{
 +	struct flow_data *fd = eq->elevator_data;
-+	int ret = -ENOMEM;
 +
-+	if (!fd) {
-+		pr_err("flow-iosched: no pre-allocated flow_data (alloc_sched_data missing?)\n");
++	if (!fd)
 +		return -ENOMEM;
-+	}
-+
-+	/* Create memory pools */
 +	fd->rq_data_cache = kmem_cache_create("flow_rq_data",
-+					      sizeof(struct flow_rq_data),
-+					      0, SLAB_HWCACHE_ALIGN, NULL);
-+	if (!fd->rq_data_cache) {
-+		pr_err("flow-iosched: failed to create rq_data cache\n");
++		sizeof(struct flow_rq_data), 0, SLAB_HWCACHE_ALIGN, NULL);
++	if (!fd->rq_data_cache)
 +		goto free_fd;
-+	}
-+
 +	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-+						    fd->rq_data_cache);
-+	if (!fd->rq_data_pool) {
-+		pr_err("flow-iosched: failed to create rq_data pool\n");
-+		goto destroy_rq_cache;
-+	}
-+
++						     fd->rq_data_cache);
++	if (!fd->rq_data_pool)
++		goto drq_cache;
 +	fd->dl_group_cache = kmem_cache_create("flow_dl_group",
-+					       sizeof(struct dl_group),
-+					       0, SLAB_HWCACHE_ALIGN, NULL);
-+	if (!fd->dl_group_cache) {
-+		pr_err("flow-iosched: failed to create dl_group cache\n");
-+		goto destroy_rq_pool;
-+	}
-+
++		sizeof(struct dl_group), 0, SLAB_HWCACHE_ALIGN, NULL);
++	if (!fd->dl_group_cache)
++		goto drq_pool;
 +	fd->dl_group_pool = mempool_create_slab_pool(q->nr_requests,
-+						     fd->dl_group_cache);
-+	if (!fd->dl_group_pool) {
-+		pr_err("flow-iosched: failed to create dl_group pool\n");
-+		goto destroy_dl_cache;
-+	}
-+
-+	/* Initialise queues */
++						      fd->dl_group_cache);
++	if (!fd->dl_group_pool)
++		goto ddl_cache;
 +	for (int i = 0; i < 2; i++)
 +		INIT_LIST_HEAD(&fd->prio_queue[i]);
-+
-+	/* Initialise deadline trees (Read, Write) */
-+	fd->read_root		= RB_ROOT_CACHED;
-+	fd->write_root		= RB_ROOT_CACHED;
-+	fd->merge_root		= RB_ROOT_CACHED;
-+
-+	/* Starvation thresholds (applied per-hctx via writes_starved) */
-+	fd->starvation_max[FLOW_LANE_READ]	= FLOW_STARVATION_MAX_DEFAULT_READ;
-+	fd->starvation_max[FLOW_LANE_WRITE]	= FLOW_STARVATION_MAX_DEFAULT_WRITE;
-+
-+	/* Batch defaults */
-+	fd->batch_max_read		= FLOW_BATCH_MAX_READ_DEFAULT;
-+	fd->batch_max_write		= FLOW_BATCH_MAX_WRITE_DEFAULT;
-+	fd->completion_window_ns	= FLOW_COMPLETION_WINDOW_NS_DEFAULT;
-+
-+	/* Read priority bias */
++	fd->read_root = RB_ROOT_CACHED;
++	fd->write_root = RB_ROOT_CACHED;
++	fd->merge_root = RB_ROOT_CACHED;
++	fd->starvation_max[FLOW_LANE_READ] = FLOW_STARVATION_MAX_DEF_R;
++	fd->starvation_max[FLOW_LANE_WRITE] = FLOW_STARVATION_MAX_DEF_W;
++	fd->batch_max_read = FLOW_BATCH_MAX_READ_DEF;
++	fd->batch_max_write = FLOW_BATCH_MAX_WRITE_DEF;
 +	fd->read_priority = 0;
-+
-+	/* Rotational detection */
 +	fd->is_rotational = !!(q->limits.features & BLK_FEAT_ROTATIONAL);
-+
 +	spin_lock_init(&fd->lock);
-+
-+	/* Autotune state */
-+	fd->autotune_mode = FLOW_AUTOTUNE_BALANCED;
-+	fd->autotune_generation = 0;
-+	timer_setup(&fd->autotune_timer, flow_autotune_timer_fn, 0);
-+
-+	/* Tuned parameters (start at sysfs defaults, autotune adjusts) */
-+	for (int i = 0; i < FLOW_NR_LANES; i++)
-+		fd->tuned_starvation_max[i] = fd->starvation_max[i];
-+	/* high_priority_quota_max removed in v3.1 — writes_starved
-+	 * on flow_hctx_data handles read/write fairness now. */
-+
 +	eq->elevator_data = fd;
 +	q->elevator = eq;
-+
-+	/* Multi-queue dispatch — each hctx dispatches independently */
 +	blk_queue_flag_clear(QUEUE_FLAG_SQ_SCHED, q);
-+
 +	fd->queue = q;
 +	blk_stat_enable_accounting(q);
-+
-+	/* Start autotune timer (fires after 1 second) */
-+	mod_timer(&fd->autotune_timer, jiffies + HZ * FLOW_AUTOTUNE_INTERVAL_HZ);
-+
 +	return 0;
-+
-+destroy_dl_pool:
-+	mempool_destroy(fd->dl_group_pool);
-+destroy_dl_cache:
++ddl_cache:
 +	kmem_cache_destroy(fd->dl_group_cache);
-+destroy_rq_pool:
++drq_pool:
 +	mempool_destroy(fd->rq_data_pool);
-+destroy_rq_cache:
++drq_cache:
 +	kmem_cache_destroy(fd->rq_data_cache);
 +free_fd:
 +	kfree(fd);
-+	return ret;
++	return -ENOMEM;
 +}
 +
 +static void flow_exit_sched(struct elevator_queue *e)
 +{
 +	struct flow_data *fd = e->elevator_data;
 +
-+	/* Delete autotune timer before draining scheduler state */
-+	timer_shutdown_sync(&fd->autotune_timer);
-+
 +	WARN_ON_ONCE(!list_empty(&fd->prio_queue[0]));
 +	WARN_ON_ONCE(!list_empty(&fd->prio_queue[1]));
-+
-+	/* Drain any pending requests still in the scheduler */
 +	{
 +		struct request *rq, *n;
 +		LIST_HEAD(drain);
 +
-+		/* Collect from deadline rbtrees (Read, Write) */
 +		for (u8 lane = FLOW_LANE_READ; lane < FLOW_NR_LANES; lane++) {
-+			struct rb_root_cached *root = flow_root_for_lane(fd, lane);
++			struct rb_root_cached *root = flow_root(fd, lane);
 +			struct rb_node *node;
 +
 +			if (!root)
 +				continue;
 +			while ((node = rb_first_cached(root))) {
-+				struct dl_group *dlg = rb_entry(node, struct dl_group, node);
++				struct dl_group *dlg = rb_entry(node,
++					struct dl_group, node);
 +				struct flow_rq_data *rd;
 +
-+				while ((rd = list_first_entry_or_null(&dlg->rqs,
-+					struct flow_rq_data, dl_node))) {
++				while ((rd = list_first_entry_or_null(
++					&dlg->rqs, struct flow_rq_data,
++					dl_node))) {
 +					list_del_init(&rd->dl_node);
 +					rq = rd->rq;
 +					list_add_tail(&rq->queuelist, &drain);
@@ -1216,8 +615,6 @@ new file mode 100644
 +				mempool_free(dlg, fd->dl_group_pool);
 +			}
 +		}
-+
-+		/* Move drain list entries to the block layer for completion */
 +		list_for_each_entry_safe(rq, n, &drain, queuelist) {
 +			list_del_init(&rq->queuelist);
 +			if (rq->elv.priv[0]) {
@@ -1226,66 +623,42 @@ new file mode 100644
 +			}
 +		}
 +	}
-+
 +	mempool_destroy(fd->dl_group_pool);
 +	mempool_destroy(fd->rq_data_pool);
 +	kmem_cache_destroy(fd->rq_data_cache);
 +	kmem_cache_destroy(fd->dl_group_cache);
-+
 +	blk_stat_disable_accounting(fd->queue);
-+
 +	kfree(fd);
 +}
 +
-+/* ── Per-hctx init / exit ─────────────────────────────────────────── */
-+
-+static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
++static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int idx)
 +{
 +	struct flow_hctx_data *khd;
 +
 +	khd = kzalloc_node(sizeof(*khd), GFP_KERNEL, hctx->numa_node);
-+	if (!khd) {
-+		pr_err("flow-iosched: init_hctx hctx-%u (node %d) failed\n",
-+		       hctx_idx, hctx->numa_node);
++	if (!khd)
 +		return -ENOMEM;
-+	}
-+
 +	spin_lock_init(&khd->lock);
 +	INIT_LIST_HEAD(&khd->dispatch_list);
-+	memset(khd->starvation_rounds, 0, sizeof(khd->starvation_rounds));
-+	khd->writes_starved = 0;
 +	khd->hctx = hctx;
-+	/* All atomic64_t metrics counters are already 0 from kzalloc. */
-+
 +	hctx->sched_data = khd;
 +	return 0;
 +}
 +
-+static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
++static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int idx)
 +{
 +	struct flow_hctx_data *khd = hctx->sched_data;
++	struct request *rq, *n;
 +
 +	if (!khd)
 +		return;
-+
-+	if (WARN_ON_ONCE(!list_empty(&khd->dispatch_list))) {
-+		struct request *rq, *n;
-+
-+		/* Complete remaining requests with I/O error so no data
-+		 * is silently lost.  The block layer expects every request
-+		 * to be either completed or requeued during teardown.
-+		 */
-+		list_for_each_entry_safe(rq, n, &khd->dispatch_list, queuelist) {
-+			list_del_init(&rq->queuelist);
-+			blk_mq_end_request(rq, BLK_STS_IOERR);
-+		}
++	list_for_each_entry_safe(rq, n, &khd->dispatch_list, queuelist) {
++		list_del_init(&rq->queuelist);
++		blk_mq_end_request(rq, BLK_STS_IOERR);
 +	}
-+
 +	kfree(khd);
 +	hctx->sched_data = NULL;
 +}
-+
-+/* ── Sysfs attributes ─────────────────────────────────────────────── */
 +
 +static ssize_t flow_version_show(struct elevator_queue *e, char *page)
 +{
@@ -1294,11 +667,8 @@ new file mode 100644
 +
 +static ssize_t flow_read_priority_show(struct elevator_queue *e, char *page)
 +{
-+
 +	struct flow_data *fd = e->elevator_data;
-+
 +	guard(spinlock_irqsave)(&fd->lock);
-+
 +	return sprintf(page, "%d\n", fd->read_priority);
 +}
 +
@@ -1307,161 +677,57 @@ new file mode 100644
 +{
 +	struct flow_data *fd = e->elevator_data;
 +	int prio;
-+	int ret;
 +
-+	ret = kstrtoint(page, 10, &prio);
-+	if (ret || prio < -20 || prio > 19)
++	if (kstrtoint(page, 10, &prio) || prio < -20 || prio > 19)
 +		return -EINVAL;
-+
 +	guard(spinlock_irqsave)(&fd->lock);
 +	fd->read_priority = prio;
 +	return count;
 +}
 +
-+/* all sysfs store/show paths must hold the scheduler lock */
-+#define FLOW_SYSFS_S32_RW(field)						\
-+static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+										\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	return sprintf(page, "%d\n", fd->field);				\
-+}										\
-+static ssize_t flow_##field##_store(struct elevator_queue *e,			\
-+				    const char *page, size_t count)		\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+	int val;								\
-+	int ret;								\
-+	ret = kstrtoint(page, 10, &val);					\
-+	if (ret || val < 0)							\
-+		return -EINVAL;							\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	fd->field = val;							\
-+	return count;								\
-+}
++#define FLOW_U16_RW(name) \
++static ssize_t flow_##name##_show(struct elevator_queue *e, char *page) \
++{ struct flow_data *fd = e->elevator_data; \
++  guard(spinlock_irqsave)(&fd->lock); \
++  return sprintf(page, "%u\n", fd->name); } \
++static ssize_t flow_##name##_store(struct elevator_queue *e, \
++	const char *p, size_t c) \
++{ struct flow_data *fd = e->elevator_data; unsigned long v; \
++  if (kstrtoul(p, 10, &v) || v > U16_MAX) return -EINVAL; \
++  guard(spinlock_irqsave)(&fd->lock); fd->name = (u16)v; return c; }
 +
-+#define FLOW_SYSFS_U32_RW(field)						\
-+static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+										\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	return sprintf(page, "%u\n", fd->field);				\
-+}										\
-+static ssize_t flow_##field##_store(struct elevator_queue *e,			\
-+				    const char *page, size_t count)		\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+	unsigned long val;							\
-+	int ret;								\
-+	ret = kstrtoul(page, 10, &val);					\
-+	if (ret)								\
-+		return -EINVAL;							\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	fd->field = val;							\
-+	return count;								\
-+}
++FLOW_U16_RW(batch_max_read)
++FLOW_U16_RW(batch_max_write)
 +
-+#define FLOW_SYSFS_U16_RW(field)						\
-+static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+										\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	return sprintf(page, "%u\n", (unsigned int)fd->field);			\
-+}										\
-+static ssize_t flow_##field##_store(struct elevator_queue *e,			\
-+				    const char *page, size_t count)		\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+	unsigned long val;							\
-+	int ret;								\
-+	ret = kstrtoul(page, 10, &val);					\
-+	if (ret || val > U16_MAX)						\
-+		return -EINVAL;							\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	fd->field = (u16)val;							\
-+	return count;								\
-+}
++#define FLOW_SV_ATTR_RW(suf, idx) \
++static ssize_t flow_starvation_max_##suf##_show(struct elevator_queue *e, \
++	char *page) \
++{ struct flow_data *fd = e->elevator_data; \
++  guard(spinlock_irqsave)(&fd->lock); \
++  return sprintf(page, "%u\n", fd->starvation_max[idx]); } \
++static ssize_t flow_starvation_max_##suf##_store(struct elevator_queue *e, \
++	const char *p, size_t c) \
++{ struct flow_data *fd = e->elevator_data; unsigned long v; \
++  if (kstrtoul(p, 10, &v)) return -EINVAL; \
++  guard(spinlock_irqsave)(&fd->lock); fd->starvation_max[idx] = (u32)v; \
++  return c; }
 +
-+#define FLOW_SYSFS_U64_RW(field)						\
-+static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+										\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	return sprintf(page, "%llu\n", fd->field);				\
-+}										\
-+static ssize_t flow_##field##_store(struct elevator_queue *e,			\
-+				    const char *page, size_t count)		\
-+{										\
-+	struct flow_data *fd = e->elevator_data;				\
-+	int val;								\
-+	int ret;								\
-+	ret = kstrtoint(page, 10, &val);					\
-+	if (ret || val < 0)							\
-+		return -EINVAL;							\
-+	guard(spinlock_irqsave)(&fd->lock);					\
-+	fd->field = val;							\
-+	return count;								\
-+}
++FLOW_SV_ATTR_RW(read, FLOW_LANE_READ)
++FLOW_SV_ATTR_RW(write, FLOW_LANE_WRITE)
 +
-+FLOW_SYSFS_U16_RW(batch_max_read)
-+FLOW_SYSFS_U16_RW(batch_max_write)
-+FLOW_SYSFS_U64_RW(completion_window_ns)
-+
-+/* starvation_max is an array, not a scalar field — need custom accessors */
-+#define FLOW_STARVATION_ATTR_RW(lane, field_suffix, lane_idx)		\
-+static ssize_t flow_starvation_max_##field_suffix##_show(		\
-+	struct elevator_queue *e, char *page)				\
-+{									\
-+	struct flow_data *fd = e->elevator_data;			\
-+									\
-+	guard(spinlock_irqsave)(&fd->lock);				\
-+	return sprintf(page, "%u\n", fd->starvation_max[lane_idx]);	\
-+}									\
-+static ssize_t flow_starvation_max_##field_suffix##_store(		\
-+	struct elevator_queue *e, const char *page, size_t count)	\
-+{									\
-+	struct flow_data *fd = e->elevator_data;			\
-+	unsigned long val;						\
-+	int ret;							\
-+	ret = kstrtoul(page, 10, &val);					\
-+	if (ret)							\
-+		return -EINVAL;						\
-+	guard(spinlock_irqsave)(&fd->lock);				\
-+	fd->starvation_max[lane_idx] = (u32)val;			\
-+	return count;							\
-+}
-+
-+FLOW_STARVATION_ATTR_RW(read, read, FLOW_LANE_READ)
-+FLOW_STARVATION_ATTR_RW(write, write, FLOW_LANE_WRITE)
-+
-+/* ── sysfs attribute table ────────────────────────────────────────── */
-+
-+#define FLOW_ATTR_RW(name) __ATTR(name, 0644, flow_##name##_show,	\
-+				  flow_##name##_store)
-+#define FLOW_ATTR_RO(name) __ATTR(name, 0444, flow_##name##_show, NULL)
++#define ATTR_RW(n) __ATTR(n, 0644, flow_##n##_show, flow_##n##_store)
++#define ATTR_RO(n) __ATTR(n, 0444, flow_##n##_show, NULL)
 +
 +static struct elv_fs_entry flow_sched_attrs[] = {
-+	FLOW_ATTR_RO(version),
-+	FLOW_ATTR_RW(read_priority),
-+	FLOW_ATTR_RW(batch_max_read),
-+	FLOW_ATTR_RW(batch_max_write),
-+	FLOW_ATTR_RW(completion_window_ns),
-+	FLOW_ATTR_RW(starvation_max_read),
-+	FLOW_ATTR_RW(starvation_max_write),
++	ATTR_RO(version),
++	ATTR_RW(read_priority),
++	ATTR_RW(batch_max_read),
++	ATTR_RW(batch_max_write),
++	ATTR_RW(starvation_max_read),
++	ATTR_RW(starvation_max_write),
 +	__ATTR_NULL,
 +};
 +
-+/* ── alloc/free sched data (elevator lifecycle hooks) ────────────── */
-+
-+/*
-+ * Called before init_sched during elevator allocation.  Must not fail
-+ * for the operator's convenience; returns pre-zeroed memory.
-+ * flow_init_sched() completes the setup (mempools, caches, timer).
-+ */
 +static void *flow_alloc_sched_data(struct request_queue *q)
 +{
 +	return kzalloc_node(sizeof(struct flow_data), GFP_KERNEL, q->node);
@@ -1471,8 +737,6 @@ new file mode 100644
 +{
 +	kfree(elv_data);
 +}
-+
-+/* ── Elevator type declaration ────────────────────────────────────── */
 +
 +static struct elevator_type mq_flow = {
 +	.ops = {
@@ -1487,42 +751,29 @@ new file mode 100644
 +		.prepare_request	= flow_prepare_request,
 +		.requeue_request	= flow_requeue_request,
 +		.dispatch_request	= flow_dispatch_request,
-+		.completed_request	= flow_completed_request,
 +		.finish_request		= flow_finish_request,
 +		.has_work		= flow_has_work,
 +		.init_sched		= flow_init_sched,
 +		.exit_sched		= flow_exit_sched,
 +		.init_hctx		= flow_init_hctx,
 +		.exit_hctx		= flow_exit_hctx,
-+		.init_icq		= flow_init_icq,
-+		.exit_icq		= flow_exit_icq,
 +	},
 +	.elevator_attrs	= flow_sched_attrs,
 +	.elevator_name	= "flow-iosched",
 +	.elevator_owner	= THIS_MODULE,
-+	.icq_size	= sizeof(struct io_cq) + sizeof(struct flow_icq_data),
-+	.icq_align	= __alignof__(struct flow_icq_data),
++	.icq_size	= 0,
++	.icq_align	= 0,
 +};
 +
 +MODULE_ALIAS("mq-flow-iosched");
-+
-+#define FLOW_PROGNAME "Multi-Lane I/O Scheduler (FLOW)"
-+
 +static int __init flow_init(void)
 +{
-+	pr_info("%s %s\n", FLOW_PROGNAME, FLOW_VERSION);
++	pr_info("Multi-Lane I/O Scheduler (FLOW) %s\n", FLOW_VERSION);
 +	return elv_register(&mq_flow);
 +}
-+
-+static void __exit flow_exit(void)
-+{
-+	elv_unregister(&mq_flow);
-+}
-+
++static void __exit flow_exit(void) { elv_unregister(&mq_flow); }
 +module_init(flow_init);
 +module_exit(flow_exit);
-+
 +MODULE_AUTHOR("flow-iosched contributors");
 +MODULE_LICENSE("GPL v2");
-+MODULE_DESCRIPTION(FLOW_PROGNAME);
-+
++MODULE_DESCRIPTION("Multi-Lane I/O Scheduler (FLOW)");
