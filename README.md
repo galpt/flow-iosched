@@ -28,104 +28,98 @@ matching mq-deadline's proven design.
 
 ## Design
 
+Read the diagram like this:
+
+- start at the `Start` circle
+- follow arrows from top to bottom
+- diamond shapes are lane classification decisions — the arrow label tells you which requests go where
+- solid arrows show the main data flow from request to device
+- dotted arrows show how the writes_starved anti-starvation counter influences dispatch
+- the emergency lane is drained before any other lane on every dispatch cycle
+- the Read lane is dispatched in batches (up to `batch_max_read`)
+- the Write lane is dispatched when the Read lane is empty or the writes_starved threshold has been exceeded
+
 ```mermaid
 flowchart TB
-    A1["1. I/O Request
+    Start((Start)) --> A1["1. I/O Request
 
 A bio arrives from the blk-mq layer.
-flow_prepare_request() allocates a
-flow_rq_data struct from the mempool."]
+flow_prepare_request() allocates
+a flow_rq_data struct from the
+mempool."]
 
-    B1["2. Lane Classification
+    A1 --> B1["2. Lane Classification
 
-flow_assign_lane() inspects the request's
-cmd_flags (sync, meta, priority),
-is_write, blk_rq_bytes, and insert_flags
-(AT_HEAD). Returns a lane (0-2) and
-deadline. No IO profile recomputation,
-no budget containment."]
+flow_assign_lane() inspects:
+cmd_flags, is_write, size,
+insert_flags. Returns a lane
+(0 = Emergency, 1 = Read,
+2 = Write) and a deadline."]
 
-    N3["3. Three Priority Lanes
+    B1 --> N3{"3. Which Lane?"}
 
-Dispatch walks lanes in priority order:
-Emergency > Read > Write.
-Each lane has its own deadline-sorted
-rbtree (rb_root_cached)."]
-
-    C1["Emergency
+    N3 -- "AT_HEAD bypass?\n→ Emergency (Tier 0)" --> C1["Emergency
 
 BLK_MQ_INSERT_AT_HEAD bypass.
-Queued in prio_queue[0] for immediate,
-unconditional dispatch. No rbtree."]
+Queued in prio_queue[0] for
+immediate, unconditional dispatch.
+No rbtree — pure FIFO."]
 
-    D1["Read
+    N3 -- "Sync read, REQ_META,\nREQ_PRIO, or ≤ 4 KB?\n→ Read (Tier 1)" --> D1["Read
 
-Synchronous reads, REQ_META, REQ_PRIO,
+Sync reads, metadata, priority,
 and small writes ≤ 4 KB.
-FIFO for reads, short deadline
-window (2 ms) for small writes.
-Async depth capped at nr_requests / 3."]
+FIFO for reads; 2 ms deadline
+window for small writes.
+Async depth: nr_requests / 3."]
 
-    F1["Write
+    N3 -- "Async write or\nbest-effort I/O?\n→ Write (Tier 2)" --> F1["Write
 
 Async writes and best-effort I/O.
-Large deadline window (2000ms).
-Dispatched when Read lane is empty
-or writes_starved threshold exceeded."]
+Large deadline window (2000 ms).
+Dispatched only after Read lane
+is drained or writes_starved ≥ 2."]
 
-    H1["4. Per-hctx Dispatch
+    C1 -->|"Immediate: prio_queue[0]\ndrained first every cycle"| H1["4. Per-hctx Dispatch
 
 flow_dispatch_request(hctx):
-Single-phase dispatch under fd->lock.
-Refills the per-hctx dispatch list
-from lane rbtrees, then pops from it.
-The old two-phase fast path (v2.0)
-was removed — it added complexity
-without measurable benefit.
-QUEUE_FLAG_SQ_SCHED is cleared."]
+1. Pop Emergency/barrier prio queue
+2. Fill dispatch list from rbtrees
+   via flow_fill_dispatch_locked()
+3. Pop one request from dispatch list
+Single-phase under fd->lock.
+QUEUE_FLAG_SQ_SCHED cleared."]
 
-    I1["5. Device
+    D1 -->|"Batch: up to batch_max_read (16)\nper dispatch cycle"| H1
+
+    F1 -->|"If writes_starved ≥ 2:\nforce before reads.\nOtherwise: after reads."| H1
+
+    H1 -->|"Request submitted\nto hardware queue"| I1["5. Device
 
 NVMe, SATA, or virtual device.
-Multiple hardware queues."]
+Multiple hardware queues (hctx).
+Each hctx dispatches independently."]
 
-    K1["Writes-Starvation Anti-Starvation
+    D1 -.->|"Read batch completed\nwhile writes pending?\n→ Increment counter"| K1["Writes-Starvation Counter
 
-Per-hctx writes_starved counter.
-Each time a read batch completes
-and writes are still pending, the
-counter increments. When it reaches
-FLOW_WRITES_STARVED_DEFAULT (2),
-the dispatch path unconditionally
-forces writes before reads.
-Counter resets when writes dispatch.
-Same proven pattern as mq-deadline's
-writes_starved mechanism."]
+Per-hctx writes_starved.
+Default threshold: 2.
+Same proven pattern as
+mq-deadline's writes_starved."]
 
-    L1["ICQ Lifecycle
+    F1 -.->|"Writes dispatched?\n→ Reset counter to 0"| K1
+
+    K1 -.->|"Counter ≥ threshold?\n→ Force writes before reads\non next dispatch cycle"| H1
+
+    L1["Background: ICQ Lifecycle
 
 flow_icq_data tracks only
 last_io_completed (atomic64_t).
-All per-process budget fields
-(io_budget_sectors, containment_score,
-last_io_inserted) removed in v3.1.
-flow_init_icq() sets the timestamp;
-flow_exit_icq() resets it atomically."]
+Budget fields removed in v3.1.
+flow_init_icq() sets timestamp;
+flow_exit_icq() resets it."]
 
-    A1 --> B1
-    B1 --> N3
-    N3 --> C1
-    N3 --> D1
-    N3 --> F1
-    C1 --> H1
-    D1 --> H1
-    F1 --> H1
-    H1 --> I1
-
-    D1 -.-> K1
-    F1 -.-> K1
-    K1 -.-> H1
-
+    style Start fill:#1e293b,stroke:#0ea5e9,stroke-width:2,color:#fff
     style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2,color:#1e293b
     style B1 fill:#fff,stroke:#94a3b8,stroke-width:2,color:#1e293b
     style N3 fill:#fff,stroke:#64748b,stroke-width:2,color:#1e293b
@@ -138,28 +132,22 @@ flow_exit_icq() resets it atomically."]
     style L1 fill:#f0fdf4,stroke:#22c55e,stroke-width:2,color:#1e293b
 ```
 
-Each request is classified into a lane at insertion time based on its
-`cmd_flags` (sync, meta, flush, priority) and size.  Per-lane deadline-
-sorted red-black trees (plus two FIFO priority queues for the barrier
-tiers) are the primary scheduling state.  The scx_flow-derived IO
-profile recomputation, latency credit/debt system, and per-process
-budget containment have all been removed — lane assignment is purely
-based on request flags.
+The diagram above covers the main I/O path.  A few implementation details
+that do not fit in the flowchart:
 
-Dispatch uses a single-phase model under the global scheduler lock:
-each hardware context fills its dispatch list from the deadline rbtrees,
-then pops from it.  Anti-starvation uses a writes_starved counter
-(mq-deadline pattern): after 2 consecutive read batches while writes
-are pending, writes are unconditionally dispatched.  This deterministic
-bound (at most 2 × batch_max_read = 32 requests) is provably starvation-
-free, unlike the old budget-containment model which created a positive-
-feedback loop under sequential write loads.
-
-A 3-mode autotuner (Balanced / Latency / Throughput) runs every second.
-It aggregates per-hctx dispatch metrics via atomic64_xchg (eliminating
-the cross-lock counter-loss race), computes workload ratios, and adjusts
-batch sizes and starvation thresholds toward the mode target.  No sysfs
-intervention is needed for common workloads.
+- **Two FIFO priority queues** (`prio_queue[0]` and `prio_queue[1]`) back
+  the Emergency lane and the barrier/flush path.  These are drained before
+  the deadline rbtrees on every dispatch cycle.
+- **Each non-Emergency lane has its own deadline-sorted red-black tree**
+  (`read_root`, `write_root`).  Requests within a lane are grouped by
+  quantised deadline into `dl_group` nodes.
+- **A 3-mode autotuner** (Balanced / Latency / Throughput) runs every
+  second.  It aggregates per-hctx dispatch metrics via `atomic64_xchg`
+  (eliminates the cross-lock counter-loss race), computes workload ratios,
+  and adjusts `batch_max_read` and `starvation_max_write` toward the mode
+  target.  No sysfs intervention is needed for common workloads.
+- **`QUEUE_FLAG_SQ_SCHED` is cleared**, so each hardware context dispatches
+  independently — no single-queue bottleneck on multi-queue NVMe devices.
 
 ## Kernel Compatibility
 
