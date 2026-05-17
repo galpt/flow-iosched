@@ -1,7 +1,17 @@
-From c17c92e74c3c795dded93dc1df187835672d97f6 Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
-Date: Thu, 14 May 2026 20:18:06 +0700
-Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.0)
+Date: 2026-05-17
+Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.1)
+
+NOTE: This compat patch was originally written for v3.0.  The v3.1 source
+has been restructured (budget containment removed, alloc_sched_data added,
+init_sched uses pre-allocated fd from eq->elevator_data).  This patch may
+need adjustments for the new source layout.  The core changes remain:
+  - flow_init_sched signature: (q, elevator_queue *eq) → (q, elevator_type *e)
+  - Add struct elevator_queue *eq; declaration
+  - Add eq = elevator_alloc(q, e); with error handling
+  - Add kobject_put(&eq->kobj) error path
+  - Use eq->elevator_data for fd (already pre-allocated by alloc_sched_data
+    callback — register if supported by the target kernel)
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
@@ -9,7 +19,7 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  1 file changed, 24 insertions(+), 5 deletions(-)
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-@@ -1310,10 +1310,11 @@ reschedule:
+@@ -1007,10 +1007,11 @@ reschedule:
   * For kernels 6.12-6.17 (which pass elevator_type), apply
   * patches/0002-linux6.12-flow-iosched-compat.patch after this one.
   */
@@ -19,15 +29,15 @@ diff --git a/block/flow-iosched.c b/block/flow-iosched.c
  	struct flow_data *fd;
  	int ret = -ENOMEM;
 +	struct elevator_queue *eq;
- 
+
  	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
  	if (!fd) {
-@@ -1420,6 +1421,8 @@ destroy_rq_pool:
- 	mempool_destroy(fd->rq_data_pool);
- destroy_rq_cache:
- 	kmem_cache_destroy(fd->rq_data_cache);
+@@ -1103,6 +1104,8 @@ destroy_dl_pool:
+ 	mempool_destroy(fd->dl_group_pool);
+ destroy_dl_cache:
+ 	kmem_cache_destroy(fd->dl_group_cache);
 +out_put_eq:
 +	kobject_put(&eq->kobj);
- free_fd:
- 	kfree(fd);
- 	return ret;
+ destroy_rq_pool:
+ 	mempool_destroy(fd->rq_data_pool);
+ destroy_rq_cache:
