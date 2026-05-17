@@ -649,7 +649,7 @@ that shaped its design:
 
 - **[ADIOS](https://github.com/firelzrd/adios)** — Adaptive Deadline I/O
   Scheduler.  The batch queue architecture, deadline-based rbtrees, and kernel
-  integration pattern are directly adapted from ADIOS.  The per-request
+  integration pattern are directly adapted from ADIOS v3.2.0.  The per-request
   lifecycle pattern (`prepare_request` / `finish_request`) and the prio_queue +
   dl_tree data structure design follow ADIOS closely.
 - **[Kyber](https://github.com/torvalds/linux/blob/master/block/kyber-iosched.c)**
