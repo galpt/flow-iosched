@@ -1,26 +1,6 @@
-From: Galih Tama <galpt@v.recipes>
-Date: 2026-05-17
-Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.1 LSB)
-
-Kernels 6.12-6.17 have a different init_sched API signature and lack
-the alloc_sched_data / free_sched_data elevator ops.  This patch adapts
-the v3.1 LSB source for those kernels:
-
-  - flow_init_sched signature: (q, elevator_queue *eq) -> (q, elevator_type *e)
-  - Add elevator_alloc() and kzalloc() calls inside init_sched
-  - Add kobject_put(&eq->kobj) error path
-  - Remove alloc_sched_data and free_sched_data from ops table
-
-Signed-off-by: Galih Tama <galpt@v.recipes>
----
- block/flow-iosched.c | 19 +++++++++++++++----
- 1 file changed, 15 insertions(+), 4 deletions(-)
-
-diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index 2ba4c0b..f8e9d2a 100644
---- a/block/flow-iosched.c
-+++ b/block/flow-iosched.c
-@@ -447,14 +447,21 @@ static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
+--- a/block/flow-iosched.c	2026-05-17 18:08:51.453988450 +0700
++++ b/block/flow-iosched.c	2026-05-17 18:08:51.463279642 +0700
+@@ -447,14 +447,21 @@
  	       !RB_EMPTY_ROOT(&fd->write_root.rb_root);
  }
  
@@ -47,7 +27,7 @@ index 2ba4c0b..f8e9d2a 100644
  	fd->rq_data_cache = kmem_cache_create("flow_rq_data",
  		sizeof(struct flow_rq_data), 0, SLAB_HWCACHE_ALIGN, NULL);
  	if (!fd->rq_data_cache)
-@@ -496,6 +503,7 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+@@ -496,6 +503,7 @@
  drq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
  free_fd:
@@ -55,11 +35,3 @@ index 2ba4c0b..f8e9d2a 100644
  	kfree(fd);
  	return -ENOMEM;
  }
-@@ -658,8 +666,6 @@ static struct elevator_type mq_flow = {
- 	.ops = {
- 		.depth_updated		= flow_depth_updated,
--		.alloc_sched_data	= flow_alloc_sched_data,
--		.free_sched_data	= flow_free_sched_data,
- 		.next_request		= flow_next_request,
- 		.former_request		= flow_former_request,
- 		.limit_depth		= flow_limit_depth,

@@ -1,32 +1,9 @@
-From: Galih Tama <galpt@v.recipes>
-Date: 2026-05-17 14:36:19 +0700
-Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v3.1 LSB
-
-Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
-three priority tiers (Emergency / Read / Write), deadline-sorted rbtree
-dispatch, and a generalised N-lane starvation-bound framework that is
-provably starvation-free by construction (reduces to mq-deadline's
-writes_starved proof when N=2).
-
-v3.1 LSB (Lane-Starvation Bounding):
-  - Formal starvation-bound dispatch with per-lane bypass_count/max_bypass
-  - No autotune timer (static parameters, like mq-deadline)
-  - No per-process scheduling state
-  - ~700 lines, auditable in a single sitting
-
-Signed-off-by: Galih Tama <galpt@v.recipes>
----
- block/Kconfig.iosched | 35 +++++++++++++++++++++++++
- block/Makefile        |  1 +
- block/flow-iosched.c  | 696 ++++++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 732 insertions(+)
-
---- a/block/Kconfig.iosched	2026-05-15 19:53:54.000000000 +0700
-+++ b/block/Kconfig.iosched	2026-05-17 22:00:00.000000000 +0700
-@@ -44,4 +44,39 @@
+--- block/Kconfig.iosched	2026-05-15 19:53:54.000000000 +0700
++++ b/block/Kconfig.iosched	2026-05-17 18:08:51.438985182 +0700
+@@ -44,4 +44,41 @@
  	Enable some debugging help. Currently it exports additional stat
  	files in a cgroup which can be useful for debugging.
-
+ 
 +
 +config MQ_IOSCHED_FLOW
 +	tristate "Multi-Lane I/O scheduler (FLOW)"
@@ -67,7 +44,7 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
  endmenu
 
 --- a/block/Makefile	2026-05-15 19:53:54.000000000 +0700
-+++ b/block/Makefile	2026-05-17 22:00:00.000000000 +0700
++++ b/block/Makefile	2026-05-17 18:08:51.440985245 +0700
 @@ -22,6 +22,7 @@
  obj-$(CONFIG_BLK_CGROUP_IOCOST)	+= blk-iocost.o
  obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
@@ -75,11 +52,10 @@ Signed-off-by: Galih Tama <galpt@v.recipes>
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
  bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
  obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
+ 
 
-diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-new file mode 100644
 --- /dev/null
-+++ b/block/flow-iosched.c
++++ b/block/flow-iosched.c	2026-05-17 17:44:23.442655948 +0700
 @@ -0,0 +1,696 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
