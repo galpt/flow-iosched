@@ -100,16 +100,16 @@ NVMe, SATA, or virtual device.
 Multiple hardware queues (hctx).
 Each hctx dispatches independently."]
 
-    D1 -.->|"Read batch completed\nwhile writes pending?\n→ Increment counter"| K1["Writes-Starvation Counter
+    D1 -.->|"Read-preference cycle\nwith writes still queued?\n→ Increment counter"| K1["Writes-Starvation Counter
 
 Per-hctx writes_starved.
 Default threshold: 2.
 Same proven pattern as
 mq-deadline's writes_starved."]
 
-    F1 -.->|"Writes dispatched?\n→ Reset counter to 0"| K1
+    F1 -.->|"Write-preference cycle?\n(writes_starved ≥ 2 triggered)\n→ Reset counter to 0"| K1
 
-    K1 -.->|"Counter ≥ threshold?\n→ Force writes before reads\non next dispatch cycle"| H1
+    K1 -.->|"Counter ≥ threshold?\n→ Switch to write preference\nbefore reads this cycle"| H1
 
     L1["Background: ICQ Lifecycle
 
