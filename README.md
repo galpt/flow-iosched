@@ -23,8 +23,8 @@ CPU scheduler.
 | Contained | Hog-throttled processes | Reduced dispatch rate | Limits I/O-bound interference |
 
 Dispatch priority: Emergency > Read > Write > Contained.
-Starvation counters rotate CPU-intensive I/O flows back into higher lanes so no
-lane is abandoned entirely.
+Starvation round counters force-dispatch from lanes that have been repeatedly
+bypassed, so no lane is abandoned entirely.
 
 ## Design
 
@@ -39,9 +39,9 @@ flow_rq_data struct from the mempool."]
     B1["2. Lane Classification
 
 flow_assign_lane() inspects the request's
-cmd_flags (sync, meta, flush, priority),
+cmd_flags (sync, meta, priority),
 is_write, blk_rq_bytes, and insert_flags
-(AT_HEAD). Returns a lane (1-3) and
+(AT_HEAD). Returns a lane (0-3) and
 deadline. No IO profile recomputation."]
 
     N3["3. Four Priority Lanes
@@ -128,8 +128,10 @@ fields to 0 via atomic_set, and timestamps
 via atomic64_set. flow_exit_icq()
 resets each field atomically (no memset).
 Both are NULL-guarded. Completion path
-uses lock-free atomics; insertion path
-also lock-free for per-ICQ fields."]
+reads and writes per-ICQ fields with
+lock-free atomics; insertion path holds
+fd->lock but uses atomic ops for the
+shared fields."]
 
     A1 --> B1
     B1 --> N3
@@ -341,9 +343,9 @@ the primary contention point between multi-queue dispatch and completion.
 
 The [`bench-tests/`](https://github.com/galpt/flow-iosched/tree/main/bench-tests)
 directory provides build, test, analysis, install, and cleanup scripts for
-flow-iosched kernels.  Because the `elevator.h` header is not exported for
-out-of-tree module builds, the scheduler must be integrated into a kernel
-tree via the patches and built from source.
+flow-iosched.  The standalone [`install-flow-iosched.sh`](#install-flow-ioschedsh--build-and-install-as-a-standalone-module)
+script builds and loads the module against your running kernel without
+patching the kernel tree.
 
 The [`benchmark-runs/`](https://github.com/galpt/flow-iosched/tree/main/benchmark-runs) directory contains results and charts from the test
 environment described below.
@@ -387,7 +389,7 @@ and PCIe transfer overhead.
 |-------|-------------------|
 | ![IOPS](benchmark-runs/physical_device/charts/iops.png) | **Total IOPS** — the "none" scheduler leads on random reads (this drive reaches ~390k IOPS with zero scheduling overhead), but all full schedulers cluster in the same band.  flow-iosched is competitive with mq-deadline on sequential and mixed workloads, and leads on random writes.  On random reads the gap is larger, but the headline remains: **flow-iosched's scheduling overhead does not cost you throughput on real storage under realistic mixed workloads.** |
 | ![Latency](benchmark-runs/physical_device/charts/latency.png) | **Read latency** — the NVMe controller's own latency dominates.  All schedulers cluster in the same band; flow-iosched is competitive with every other scheduler. |
-| ![Per-workload IOPS](benchmark-runs/physical_device/charts/per_workload.png) | **Per-workload breakdown** — the bars are nearly the same height across all schedulers for every workload.  The physical device, not the scheduler, is the performance ceiling. |
+| ![Per-workload IOPS](benchmark-runs/physical_device/charts/per_workload.png) | **Per-workload breakdown** — all full schedulers produce nearly identical bar heights.  The "none" scheduler shows the drive's raw ceiling on random reads, but the takeaway for real-world use is that every full scheduler converges to the same band — the choice between them does not materially change throughput. |
 | ![Consolidated averages](benchmark-runs/physical_device/charts/comparison.png) | **Averages across all workloads** — the spread visible on null_blk has collapsed.  Read IOPS, write IOPS, and latencies are all within a narrow band across schedulers.  This is the most important chart in this section: it shows that **flow-iosched's lane-based scheduling does not penalise you on real hardware.** |
 
 > [!NOTE]
@@ -516,11 +518,11 @@ environment variables.
 # Default: null_blk virtual device, 30s per test (scheduler comparison)
 sudo ./bench-tests/run-benchmarks.sh
 
-# Real hardware: dedicated device with no mounted partitions
-sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
+# Real hardware: dedicated device or partition with no mounted filesystems
+sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1p1
 
 # Longer runtime (both null_blk and real hardware)
-RUNTIME=60 sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1
+RUNTIME=60 sudo ./bench-tests/run-benchmarks.sh /dev/nvme1n1p1
 ```
 
 Workloads tested:
@@ -583,8 +585,9 @@ sudo ./bench-tests/remove-kernel.sh --all
 
 No full kernel rebuild is needed.  This script builds `flow-iosched.ko`
 against your running kernel's headers, loads it, and makes it the default
-I/O scheduler permanently (across reboots) via a udev rule.  This is the
-recommended way to try flow-iosched on your existing system.
+I/O scheduler permanently (across reboots) via a systemd oneshot service
+and modules-load.d config.  This is the recommended way to try flow-iosched
+on your existing system.
 
 ```bash
 # One-time: build, install, and enable
