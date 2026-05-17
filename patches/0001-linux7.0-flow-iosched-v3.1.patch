@@ -1,8 +1,8 @@
---- block/Kconfig.iosched	2026-05-15 19:53:54.000000000 +0700
-+++ b/block/Kconfig.iosched	2026-05-17 18:08:51.438985182 +0700
-@@ -44,4 +44,41 @@
- 	Enable some debugging help. Currently it exports additional stat
- 	files in a cgroup which can be useful for debugging.
+--- a/block/Kconfig.iosched	2026-05-17 18:19:03.963206343 +0700
++++ b/block/Kconfig.iosched	2026-05-17 18:45:48.173602974 +0700
+@@ -81,4 +81,41 @@
+ 	  patch.  For most users, the standalone module install script
+ 	  (install-flow-iosched.sh) is the recommended approach.
  
 +
 +config MQ_IOSCHED_FLOW
@@ -43,20 +43,20 @@
 +
  endmenu
 
---- a/block/Makefile	2026-05-15 19:53:54.000000000 +0700
-+++ b/block/Makefile	2026-05-17 18:08:51.440985245 +0700
-@@ -22,6 +22,7 @@
- obj-$(CONFIG_BLK_CGROUP_IOCOST)	+= blk-iocost.o
+--- a/block/Makefile	2026-05-17 18:19:03.963312032 +0700
++++ b/block/Makefile	2026-05-17 18:45:48.175500504 +0700
+@@ -23,6 +23,7 @@
  obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
  obj-$(CONFIG_MQ_IOSCHED_KYBER)	+= kyber-iosched.o
+ obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
 +obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
  bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
  obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
  
 
 --- /dev/null
-+++ b/block/flow-iosched.c	2026-05-17 17:44:23.442655948 +0700
-@@ -0,0 +1,696 @@
++++ b/block/flow-iosched.c	2026-05-17 18:44:19.987128341 +0700
+@@ -0,0 +1,697 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Multi-Lane I/O Scheduler (FLOW) — v3.1 LSB
@@ -332,9 +332,10 @@
 +	struct request *rq, *tmp;
 +	LIST_HEAD(free);
 +	LIST_HEAD(fail);
++	bool stop;
 +
 +	do {
-+		bool stop = false;
++		stop = false;
 +		scoped_guard(spinlock_irqsave, &fd->lock)
 +		for (int i = 0; i < FLOW_MAX_INSERTS; i++) {
 +			if (list_empty(list)) { stop = true; break; }
