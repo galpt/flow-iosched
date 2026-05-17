@@ -1568,7 +1568,7 @@ static ssize_t flow_read_priority_store(struct elevator_queue *e,
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
-
+	\
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%d\n", fd->field);				\
 }										\
@@ -1590,7 +1590,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
-
+	\
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%u\n", fd->field);				\
 }										\
@@ -1612,7 +1612,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
-
+	\
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%u\n", (unsigned int)fd->field);			\
 }										\
@@ -1634,7 +1634,7 @@ static ssize_t flow_##field##_store(struct elevator_queue *e,			\
 static ssize_t flow_##field##_show(struct elevator_queue *e, char *page)	\
 {										\
 	struct flow_data *fd = e->elevator_data;				\
-
+	\
 	guard(spinlock_irqsave)(&fd->lock);					\
 	return sprintf(page, "%llu\n", fd->field);				\
 }										\
@@ -1713,7 +1713,7 @@ static ssize_t flow_starvation_max_##field_suffix##_show(		\
 	struct elevator_queue *e, char *page)				\
 {									\
 	struct flow_data *fd = e->elevator_data;			\
-
+	\
 	guard(spinlock_irqsave)(&fd->lock);				\
 	return sprintf(page, "%u\n", fd->starvation_max[lane_idx]);	\
 }									\
