@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Install benchmark dependencies for flow-iosched.
-# Installs fio and python-matplotlib needed by run-benchmarks.sh and plot-results.py.
+# Install all dependencies needed by flow-iosched scripts.
+#
+# Covers:
+#   build-kernel.sh    — base-devel, bc, curl, git, python, elfutils
+#   run-benchmarks.sh  — fio
+#   plot-results.py    — python-matplotlib
 
 set -euo pipefail
 
-echo "Installing benchmark dependencies..."
+echo "Installing flow-iosched dependencies..."
 sudo -v
-sudo pacman -S --noconfirm fio python-matplotlib
+
+# Base build tools (gcc, make, patch, etc.)
+sudo pacman -S --noconfirm --needed base-devel bc curl git python elfutils
+
+# Benchmark tools
+sudo pacman -S --noconfirm --needed fio python-matplotlib
+
 echo ""
-echo "Done. You can now run benchmarks and generate charts:"
+echo "Done. You can now build kernels, run benchmarks, and generate charts:"
+echo "  sudo ./bench-tests/build-kernel.sh 7.0.8"
 echo "  sudo ./bench-tests/run-benchmarks.sh"
 echo "  python3 bench-tests/plot-results.py"

@@ -266,6 +266,20 @@ check_deps() {
         missing=true
     fi
 
+    # Check libelf — required by the kernel build for objtool and resolve_btfids.
+    # On Arch: pacman -S elfutils
+    # On Debian/Ubuntu: apt-get install libelf-dev
+    # On Fedora/RHEL: dnf install elfutils-libelf-devel
+    if ! echo '#include <gelf.h>' \
+         | cc -fsyntax-only -x c - 2>/dev/null || \
+       ! ldconfig -p 2>/dev/null | grep -q "libelf\."; then
+        err "Missing: libelf development library (install with: ${pm_install} elfutils-libelf-devel)"
+        if [ "$pm_install" = "pacman -S" ]; then
+            err "  → On Arch/CachyOS: sudo pacman -S elfutils"
+        fi
+        missing=true
+    fi
+
     if [ "$missing" = true ]; then
         die "Install missing dependencies and re-run."
     fi
