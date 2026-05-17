@@ -273,9 +273,10 @@ static void flow_insert_requests(struct blk_mq_hw_ctx *hctx,
 	struct request *rq, *tmp;
 	LIST_HEAD(free);
 	LIST_HEAD(fail);
+	bool stop;
 
 	do {
-		bool stop = false;
+		stop = false;
 		scoped_guard(spinlock_irqsave, &fd->lock)
 		for (int i = 0; i < FLOW_MAX_INSERTS; i++) {
 			if (list_empty(list)) { stop = true; break; }
