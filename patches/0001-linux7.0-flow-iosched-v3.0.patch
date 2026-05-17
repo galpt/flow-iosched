@@ -1,9 +1,29 @@
+From c9cc0e5d59e618dbc15951d23dd4bf89ae4db5d2 Mon Sep 17 00:00:00 2001
+From: Galih Tama <galpt@v.recipes>
+Date: Sat, 16 May 2026 23:49:48 +0700
+Subject: [PATCH] block: add Multi-Lane I/O Scheduler (FLOW) v3.0
+
+Add the Multi-Lane I/O scheduler (flow-iosched), a blk-mq elevator with
+four priority tiers (Emergency / Read / Write / Contained), deadline-
+sorted rbtree dispatch, per-process budget containment with proportional
+completion-based refill, and a 3-mode autotuner.
+
+Signed-off-by: Galih Tama <galpt@v.recipes>
+---
+ block/Kconfig.iosched | 27 +++++++++++++++++++++++++++
+ block/Makefile        |  1 +
+ block/flow-iosched.c  | 1813 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1841 insertions(+)
+
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
-new file mode 100644
-index 0000000..b2f002f
---- /dev/null
+index 27f1132..b2f002f 100644
+--- a/block/Kconfig.iosched
 +++ b/block/Kconfig.iosched
-@@ -0,0 +1,27 @@
+@@ -45,3 +45,30 @@ config BFQ_CGROUP_DEBUG
+ 	files in a cgroup which can be useful for debugging.
+ 
+ endmenu
++
 +config MQ_IOSCHED_FLOW
 +	tristate "Multi-Lane I/O scheduler (FLOW)"
 +	default m
@@ -31,12 +51,23 @@ index 0000000..b2f002f
 +	  Enable the FLOW I/O scheduler as the default blk-mq I/O scheduler.
 +	  The elevator core will automatically select "flow-iosched" for
 +	  multi-queue block devices during boot.
+diff --git a/block/Makefile b/block/Makefile
+index c65f4da..bc27a56 100644
+--- a/block/Makefile
++++ b/block/Makefile
+@@ -24,6 +24,7 @@ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
+ obj-$(CONFIG_MQ_IOSCHED_KYBER)	+= kyber-iosched.o
+ bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
+ obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
++obj-$(CONFIG_MQ_IOSCHED_FLOW)	+= flow-iosched.o
+ 
+ obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o t10-pi.o \
+ 				   bio-integrity-auto.o
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000..fa0c9f4
+index 0000000..fa0c9f4b2638752aa216bacfe18c1e7ed0cbfbe9
 --- /dev/null
 +++ b/block/flow-iosched.c
-@@ -0,0 +1,1813 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Multi-Lane I/O Scheduler (FLOW) — v3.0
@@ -1850,3 +1881,6 @@ index 0000000..fa0c9f4
 +MODULE_AUTHOR("flow-iosched contributors");
 +MODULE_LICENSE("GPL v2");
 +MODULE_DESCRIPTION(FLOW_PROGNAME);
+
+-- 
+2.54.0
