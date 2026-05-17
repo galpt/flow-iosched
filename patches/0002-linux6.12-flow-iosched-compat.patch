@@ -1,21 +1,21 @@
 From 5ac97817a713469e3644821cab8ae5553e54589e Mon Sep 17 00:00:00 2001
 From: Galih Tama <galpt@v.recipes>
 Date: Thu, 14 May 2026 20:18:06 +0700
-Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v2.0.1)
+Subject: [PATCH] flow-iosched: compat fix for kernels 6.12-6.17 (v3.0)
 
 Signed-off-by: Galih Tama <galpt@v.recipes>
 ---
- block/flow-iosched.c | 17 +++++++++++++++--
- 1 file changed, 15 insertions(+), 2 deletions(-)
+ block/flow-iosched.c | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index 6877056..5bd83a6 100644
+index fa0c9f4..a9510dc 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -1361,10 +1361,11 @@
- /* 6.18+ / 7.x init_sched signature: passes a pre-allocated elevator_queue.
+@@ -1310,10 +1310,11 @@
   * For kernels 6.12-6.17 (which pass elevator_type), apply
-  * patches/0002-linux6.12-flow-iosched-compat.patch after this one.     */
+  * patches/0002-linux6.12-flow-iosched-compat.patch after this one.
+  */
 -static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 +static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
  {
@@ -25,7 +25,7 @@ index 6877056..5bd83a6 100644
 
  	fd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);
  	if (!fd) {
-@@ -1372,13 +1373,18 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
+@@ -1321,6 +1322,13 @@
  		return ret;
  	}
 
@@ -34,9 +34,12 @@ index 6877056..5bd83a6 100644
 +		pr_err("flow-iosched: failed to allocate elevator\n");
 +		return -ENOMEM;
 +	}
++
++
  	/* Create memory pools */
  	fd->rq_data_cache = kmem_cache_create("flow_rq_data",
  					      sizeof(struct flow_rq_data),
+@@ -1328,7 +1336,7 @@
  					      0, SLAB_HWCACHE_ALIGN, NULL);
  	if (!fd->rq_data_cache) {
  		pr_err("flow-iosched: failed to create rq_data cache\n");
@@ -45,7 +48,7 @@ index 6877056..5bd83a6 100644
  	}
 
  	fd->rq_data_pool = mempool_create_slab_pool(q->nr_requests,
-@@ -1462,6 +1468,8 @@ destroy_rq_pool:
+@@ -1418,6 +1426,8 @@
  	mempool_destroy(fd->rq_data_pool);
  destroy_rq_cache:
  	kmem_cache_destroy(fd->rq_data_cache);
@@ -54,3 +57,5 @@ index 6877056..5bd83a6 100644
  free_fd:
  	kfree(fd);
  	return ret;
+-- 
+2.54.0
