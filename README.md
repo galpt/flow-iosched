@@ -122,7 +122,6 @@ flow_exit_icq() resets it atomically."]
     F1 --> H1
     H1 --> I1
 
-    C1 -.-> K1
     D1 -.-> K1
     F1 -.-> K1
     K1 -.-> H1
@@ -133,10 +132,8 @@ flow_exit_icq() resets it atomically."]
     style C1 fill:#fff,stroke:#dc2626,stroke-width:2,color:#1e293b
     style D1 fill:#fff,stroke:#2563eb,stroke-width:2,color:#1e293b
     style F1 fill:#fff,stroke:#16a34a,stroke-width:2,color:#1e293b
-    style G1 fill:#fff,stroke:#9333ea,stroke-width:2,color:#1e293b
     style H1 fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2,color:#1e293b
     style I1 fill:#fef2f2,stroke:#ef4444,stroke-width:2,color:#1e293b
-    style J1 fill:#faf5ff,stroke:#a855f7,stroke-width:2,color:#1e293b
     style K1 fill:#fff7ed,stroke:#f59e0b,stroke-width:2,color:#1e293b
     style L1 fill:#f0fdf4,stroke:#22c55e,stroke-width:2,color:#1e293b
 ```
