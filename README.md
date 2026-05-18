@@ -1,15 +1,17 @@
 # flow-iosched
 
-Multi-lane I/O scheduler for the Linux block layer, with deadline-sorted rbtree
-dispatch, starvation-bound N-lane anti-starvation, and no autotune.
+Multi-lane I/O scheduler for the Linux block layer, with per-hw-context FIFO
+dispatch, starvation-bound N-lane anti-starvation, zero per-request
+allocations, and no autotune.
 
 > [!NOTE]
 > flow-iosched targets general-purpose desktop and workstation machines where
 > responsiveness and throughput both matter.
-> Version 3.1 LSB (Lane-Starvation Bounding) replaces the previous
-> writes_starved counter and 3-mode autotune with a formal starvation-bound
-> framework: each lane L[i] is served at most starvation_max[i] consecutive
-> dispatch cycles apart — provably starvation-free by construction.
+> Version 4.0 moves from a single-lock architecture with per-request mempool
+> allocations to a per-hw-context design with zero dynamic allocations,
+> matching the scalability model of kyber and the allocation discipline of
+> mq-deadline.  Each lane L[i] is served at most starvation_max[i]
+> consecutive dispatch cycles apart — provably starvation-free by construction.
 
 ## Overview
 
@@ -33,7 +35,8 @@ Read the diagram like this:
 
 - start at the `Start` circle
 - follow arrows from top to bottom
-- diamond shapes are lane classification decisions — the arrow label tells you which requests go where
+- diamond shapes are lane classification decisions — the arrow label tells
+  you which requests go where
 - solid arrows show the main data flow from request to device
 - dotted arrows show how the starvation-bound counters influence dispatch
 - the emergency lane is drained before any other lane on every dispatch cycle
@@ -46,9 +49,11 @@ flowchart TB
     Start((Start)) --> A1["1. I/O Request
 
 A bio arrives from the blk-mq layer.
-flow_prepare_request() allocates
-a flow_rq_data struct from the
-mempool."]
+flow_prepare_request() stores no
+scheduler metadata (priv[0] = NULL);
+per-request state (lane, rbtree node,
+FIFO entry) is set during insertion
+using embedded request fields."]
 
     A1 --> B1["2. Lane Classification
 
@@ -56,7 +61,7 @@ flow_assign_lane() inspects:
 cmd_flags, is_write, size,
 insert_flags. Returns a lane
 (0 = Emergency, 1 = Read,
-2 = Write) and a deadline."]
+2 = Write)."]
 
     B1 --> N3{"3. Which Lane?"}
 
@@ -65,20 +70,23 @@ insert_flags. Returns a lane
 BLK_MQ_INSERT_AT_HEAD bypass.
 Queued in prio_queue[0] for
 immediate, unconditional dispatch.
-No rbtree — pure FIFO."]
+No FIFO — pure direct list."]
 
     N3 -- "Sync read, REQ_META,\nREQ_PRIO, or ≤ 4 KB?\n→ Read (Tier 1)" --> D1["Read
 
 Sync reads, metadata, priority,
 and small writes ≤ 4 KB.
-FIFO for reads; 2 ms deadline
-window for small writes.
+Per-hctx FIFO list (deadline-ordered
+by insertion); sector-sorted rbtree
+for merge lookups only.
 Async depth: nr_requests / 3."]
 
     N3 -- "Async write or\nbest-effort I/O?\n→ Write (Tier 2)" --> F1["Write
 
 Async writes and best-effort I/O.
 Large deadline window (2000 ms).
+Per-hctx FIFO + rbtree, same
+structure as Read lane.
 Dispatched after Read lane or
 when starvation forces it."]
 
@@ -86,12 +94,16 @@ when starvation forces it."]
 
 flow_dispatch_request(hctx):
 1. Pop Emergency/barrier prio queue
-2. Fill dispatch list from rbtrees
-   via flow_fill_dispatch_locked()
-   with starvation-bound dispatch
-3. Pop one request from dispatch list
-Single-phase under fd->lock.
-QUEUE_FLAG_SQ_SCHED cleared."]
+   (under fd->lock, shared)
+2. Select lane via starvation-bound
+   + batch logic (under khd->lock,
+   per-hctx — no contention with
+   other hctx on the same device)
+3. Pop one request from the
+   selected lane's FIFO, remove
+   from rbtree
+Two-phase locking.  QUEUE_FLAG_SQ_SCHED
+cleared."]
 
     D1 -->|"Batch: up to batch_max_read (16)\nper dispatch cycle"| H1
 
@@ -101,7 +113,8 @@ QUEUE_FLAG_SQ_SCHED cleared."]
 
 NVMe, SATA, or virtual device.
 Multiple hardware queues (hctx).
-Each hctx dispatches independently."]
+Each hctx dispatches independently
+with its own lock."]
 
     D1 -.->|"Read dispatched\n→ bypass_count[Write]++"| K1["Starvation-Bound
 Counters
@@ -133,10 +146,15 @@ that do not fit in the flowchart:
 
 - **Two FIFO priority queues** (`prio_queue[0]` and `prio_queue[1]`) back
   the Emergency lane and the barrier/flush path.  These are drained before
-  the deadline rbtrees on every dispatch cycle.
-- **Each non-Emergency lane has its own deadline-sorted red-black tree**
-  (`read_root`, `write_root`).  Requests within a lane are grouped by
-  quantised deadline into `dl_group` nodes.
+  the per-hctx FIFO lists on every dispatch cycle.
+- **Each hardware context (hctx) has its own set of per-lane FIFO lists**
+  and sector-sorted rbtrees, each protected by its own spinlock (`khd->lock`).
+  This eliminates the single-lock contention that would otherwise arise on
+  multi-queue NVMe devices (up to 16+ independent dispatch streams).
+- **Zero per-request dynamic allocations.**  The lane identifier is stored as
+  a tagged pointer in `rq->elv.priv[0]`; the deadline lives in `rq->fifo_time`;
+  rbtree linkage uses the embedded `rq->rb_node`; FIFO list membership uses
+  `rq->queuelist`.  This matches mq-deadline's allocation discipline.
 - **Starvation-bound dispatch** checks lanes from lowest priority upward
   (Write → Read).  If `bypass_count[lane] >= starvation_max[lane]` and the
   lane has pending requests, it is force-serviced and all bypass counters
@@ -150,20 +168,26 @@ that do not fit in the flowchart:
 - **No per-process scheduling state** — the ICQ lifecycle hooks and
   `completed_request` callback have been removed.  Fairness is determined
   entirely by dispatch ordering with starvation bounds.
+- **Completion-triggered re-dispatch** — when a request completes and work
+  remains pending, the hctx restart flag is marked (lighter version of BFQ's
+  pipeline-refill pattern).
 
 ## Kernel Compatibility
 
 | Kernel range | Notes |
 |---|---|
-| 7.0.x (CachyOS) | Default target — the source as-is targets this API. |
+| 7.0.x (CachyOS) | Default target — the v4.0 source targets this API. |
 | 6.18 – 6.19 | Same init_sched API as 7.x — compatible as-is. |
-| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply the existing `patches/0002-linux6.12-flow-iosched-compat.patch` for API compatibility, then build from the v3.1 source. |
+| 6.12 – 6.17 | Older init_sched + depth_updated signatures — a compat patch for v4.0 has not yet been published for this range. |
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
 > [!IMPORTANT]
-> The `patches/` directory ships `0001-linux7.0-flow-iosched-v3.1.patch`
-> for kernel 7.0.x / 6.18+ and `0002-linux6.12-flow-iosched-compat.patch`
-> for kernels 6.12–6.17.  Apply 0001 first, then 0002 for 6.12–6.17.
+> The `patches/` directory ships patches for v3.x; the v4.0 source
+> has been restructured (removed mempools, slab caches, and the
+> `flow_rq_data` / `dl_group` allocations) and the patches have not
+> yet been regenerated.  The preferred build method is the standalone
+> module build (see below), which does not require patching the kernel
+> tree.
 
 ### Standalone Module Build (Recommended)
 
@@ -212,10 +236,6 @@ config MQ_IOSCHED_FLOW
 obj-$(CONFIG_MQ_IOSCHED_FLOW) += flow-iosched.o
 ```
 
-For kernels 6.12 – 6.17, also apply
-`patches/0002-linux6.12-flow-iosched-compat.patch` for the older
-`init_sched` and `depth_updated` API signatures.
-
 Enable `CONFIG_MQ_IOSCHED_FLOW=m` (or `=y`) in your kernel config,
 build and install the kernel, then select the scheduler at runtime:
 
@@ -236,17 +256,12 @@ Attributes under `/sys/block/<device>/queue/iosched/`:
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `flow_version` | RO | — | Current scheduler version (3.1) |
+| `flow_version` | RO | — | Current scheduler version (4.0) |
 | `read_priority` | RW | 0 | Read bias vs writes at same deadline (-20 to 19) |
 | `batch_max_read` | RW | 16 | Max read requests per dispatch batch |
 | `batch_max_write` | RW | 16 | Max write requests per dispatch batch |
 | `starvation_max_read` | RW | 5 | Read max-bypass before force-dispatch |
 | `starvation_max_write` | RW | 20 | Write max-bypass before force-dispatch |
-
-Removed in v3.1 LSB: `completion_window_ns`, `sync_budget_sectors`,
-`async_budget_sectors`, `starvation_max_contained`, `contain_threshold`,
-`contain_decay_step`.  No autotune dynamic parameters — starvation bounds
-are static and provably correct across all workloads.
 
 ## Production Ready?
 
@@ -268,14 +283,6 @@ flow-iosched targets the same level of robustness, but the block layer
 demands a higher bar: an I/O scheduler operates on user data directly.
 An undetected bug can cause data corruption or filesystem inconsistency —
 not merely degraded performance.
-
-The code carries lockdep annotations on all internal scheduling functions.
-Version 3.1 LSB is the result of two structural audits: v3.0 identified
-and removed the per-process budget containment system (root cause of
-sequential write hangs); v3.1 LSB replaces the remaining ad-hoc
-writes_starved + autotune hybrid with a formal starvation-bound framework
-that is provably starvation-free by construction (~700 lines, auditable
-in a single sitting).
 
 > [!NOTE]
 > flow-iosched clears `QUEUE_FLAG_SQ_SCHED` and dispatches independently per
@@ -591,27 +598,33 @@ What the script does:
 ## Credits
 
 flow-iosched stands on the shoulders of several I/O and CPU scheduling projects
-that shaped its design:
+that shaped its design.  The architectural patterns listed below were studied,
+understood, and independently re-implemented for flow's three-lane architecture.
+No code was copied from any of these projects.
 
-- **[ADIOS](https://github.com/firelzrd/adios)** — Adaptive Deadline I/O
-  Scheduler.  The batch queue architecture, deadline-based rbtrees, and kernel
-  integration pattern are directly adapted from ADIOS v3.2.0.  The per-request
-  lifecycle pattern (`prepare_request` / `finish_request`) and the prio_queue +
-  dl_tree data structure design follow ADIOS closely.
-- **[Kyber](https://github.com/torvalds/linux/blob/master/block/kyber-iosched.c)**
-  — The `limit_depth` callback for async queue depth throttling follows the
-  approach made popular by the Kyber I/O scheduler.
 - **[mq-deadline](https://github.com/torvalds/linux/blob/master/block/mq-deadline.c)**
-  — The starvation-bound framework in v3.1 LSB is a generalisation of
-  mq-deadline's writes_starved to N lanes.  The merge-rbtree helpers
-  (`former_request` / `next_request`) and bio-merge callback follow mq-deadline
-  conventions.
+  — The starvation-bound framework is a generalisation of mq-deadline's
+  `writes_starved` to N lanes.  The use of embedded request fields
+  (`rq->elv.priv[0]` for scheduler metadata, `rq->rb_node` for rbtree
+  linkage, `rq->queuelist` for FIFO lists) follows mq-deadline's
+  zero-allocation prepare_request discipline.  The bio-merge and front-merge
+  callbacks (`bio_merge`, `request_merge`, `request_merged`,
+  `requests_merged`) follow the same contracts as mq-deadline's merge
+  infrastructure.
+- **[Kyber](https://github.com/torvalds/linux/blob/master/block/kyber-iosched.c)**
+  — The per-hw-context state design with independent per-hctx locking is
+  adapted from kyber's scalability model.  The lock-free `has_work`
+  implementation (using `list_empty_careful`) follows kyber's approach.
+  The `limit_depth` callback for async queue depth throttling follows the
+  convention kyber made popular.
+- **[BFQ](https://github.com/torvalds/linux/blob/master/block/bfq-iosched.c)**
+  — The completion-triggered re-dispatch in `flow_finish_request` (marking
+  the hctx for restart when pending work remains) is a lighter version of
+  BFQ's pipeline-refill pattern.
 - **[scx_flow](https://github.com/sched-ext/scx/tree/main/scheds/experimental/scx_flow)**
   — The 3-lane design was originally inspired by the scx_flow CPU scheduler.
-  Version 3.0 removed the scx_flow-derived IO profile recomputation and latency
-  credit/debt system.  Version 3.1 LSB replaces the remaining scx_flow-derived
-  autotune with a provable starvation-bound framework closer to mq-deadline.
-  flow-iosched now shares more structural DNA with mq-deadline than scx_flow.
+  flow-iosched now shares more structural DNA with mq-deadline than scx_flow,
+  but the lane concept originates here.
 - **Linux kernel block layer contributors** — The elevator API, blk-mq
   dispatch framework, and sbitmap infrastructure that flow-iosched builds on.
   These are developed at
