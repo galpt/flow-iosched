@@ -1,13 +1,29 @@
---- a/block/flow-iosched.c	2026-05-17 18:49:41.071576008 +0700
-+++ b/block/flow-iosched.c	2026-05-17 18:49:41.085201764 +0700
-@@ -448,14 +448,21 @@
- 	       !RB_EMPTY_ROOT(&fd->write_root.rb_root);
- }
+        From Galih Tama <galpt@v.recipes>  Mon May 18 06:32:18 2026 +0000
+        From: Galih Tama <galpt@v.recipes>
+        Date: Mon May 18 06:32:18 2026 +0000
+        Subject: [PATCH] flow-iosched: compat for 6.12-6.17 init_sched API
+
+        Kernels 6.12 through 6.17 use an older init_sched elevator op signature:
+int init_sched(struct request_queue *q, struct elevator_type *e)
+instead of the 6.18+ / 7.x signature:      int init_sched(struct
+request_queue *q, struct elevator_queue *eq)  This patch adjusts
+flow_init_sched() to match the older API by allocating the
+elevator_queue and private data itself, and adding kobject_put on the
+error path.
+
+
+        Signed-off-by: Galih Tama <galpt@v.recipes>
+        ---
+
+diff --git a/block/flow-iosched.c b/block/flow-iosched.c
+index 67d9ad99c8..f6d10b1826 100644
+--- a/block/flow-iosched.c
++++ b/block/flow-iosched.c
+@@ -609,12 +609,20 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
  
--/* 6.18+ / 7.x init_sched: passes pre-allocated elevator_queue.
-- * 6.12-6.17: apply 0002 compat patch. */
+ /* ── Init / exit ───────────────────────────────────────────────── */
+ 
 -static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
-+/* 6.12-6.17 init_sched: receives elevator_type, not pre-allocated eq. */
 +static int flow_init_sched(struct request_queue *q, struct elevator_type *e)
  {
 -	struct flow_data *fd = eq->elevator_data;
@@ -24,14 +40,7 @@
 +		return -ENOMEM;
 +	}
 +	eq->elevator_data = fd;
- 	fd->rq_data_cache = kmem_cache_create("flow_rq_data",
- 		sizeof(struct flow_rq_data), 0, SLAB_HWCACHE_ALIGN, NULL);
- 	if (!fd->rq_data_cache)
-@@ -497,6 +504,7 @@
- drq_cache:
- 	kmem_cache_destroy(fd->rq_data_cache);
- free_fd:
-+	kobject_put(&eq->kobj);
- 	kfree(fd);
- 	return -ENOMEM;
- }
+ 
+ 	INIT_LIST_HEAD(&fd->prio_queue[0]);
+ 	INIT_LIST_HEAD(&fd->prio_queue[1]);
+
