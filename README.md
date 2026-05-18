@@ -1,17 +1,9 @@
 # flow-iosched
 
-Multi-lane I/O scheduler for the Linux block layer, with per-hw-context FIFO
-dispatch, starvation-bound N-lane anti-starvation, zero per-request
-allocations, and no autotune.
+Multi-lane I/O scheduler for the Linux block layer.
 
-> [!NOTE]
-> flow-iosched targets general-purpose desktop and workstation machines where
-> responsiveness and throughput both matter.
-> Version 4.0 moves from a single-lock architecture with per-request mempool
-> allocations to a per-hw-context design with zero dynamic allocations,
-> matching the scalability model of kyber and the allocation discipline of
-> mq-deadline.  Each lane L[i] is served at most starvation_max[i]
-> consecutive dispatch cycles apart — provably starvation-free by construction.
+flow-iosched targets general-purpose desktop and workstation machines where
+responsiveness and throughput both matter.
 
 ## Overview
 
