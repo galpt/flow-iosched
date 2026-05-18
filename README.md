@@ -163,8 +163,8 @@ that do not fit in the flowchart:
 |---|---|
 | 7.0.x (CachyOS) | Default target — the v4.0 source targets this API. |
 | 6.18 – 6.19 | Same init_sched API as 7.x — compatible as-is. |
-| 6.12 – 6.17 | Older init_sched + depth_updated signatures — a compat patch for v4.0 has not yet been published for this range. |
-| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
+| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply patches/0002-linux6.12-flow-iosched-compat.patch on top of 0001. Regenerate both with `./bench-tests/generate-patches.py`. |
+| 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested.** |
 
 > [!IMPORTANT]
 > The `patches/` directory contains generated patches for in-tree
