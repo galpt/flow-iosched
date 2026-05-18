@@ -1,19 +1,22 @@
-        From Galih Tama <galpt@v.recipes>  Mon May 18 06:46:44 2026 +0000
-        From: Galih Tama <galpt@v.recipes>
-        Date: Mon May 18 06:46:44 2026 +0000
-        Subject: [PATCH] flow-iosched: compat for 6.12-6.17 init_sched API
+From: Galih Tama <galpt@v.recipes>
+Date: Mon May 18 07:04:48 2026 +0000
+Subject: [PATCH] flow-iosched: compat for 6.12-6.17 init_sched API
 
-        Kernels 6.12 through 6.17 use an older init_sched elevator op signature:
-int init_sched(struct request_queue *q, struct elevator_type *e)
-instead of the 6.18+ / 7.x signature:      int init_sched(struct
-request_queue *q, struct elevator_queue *eq)  This patch adjusts
-flow_init_sched() to match the older API by allocating the
-elevator_queue and private data itself, and adding kobject_put on the
-error path.
+    Kernels 6.12 through 6.17 use an older init_sched elevator
+    op signature:
+    
+        int init_sched(struct request_queue *q, struct elevator_type *e)
+    
+    instead of the 6.18+ / 7.x signature:
+    
+        int init_sched(struct request_queue *q, struct elevator_queue *eq)
+    
+    This patch adjusts flow_init_sched() to match the older API by
+    allocating the elevator_queue and private data itself, and adding
+    kobject_put on the error path.
 
-
-        Signed-off-by: Galih Tama <galpt@v.recipes>
-        ---
+    Signed-off-by: Galih Tama <galpt@v.recipes>
+    ---
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 index f51f28c988..aaef9be917 100644

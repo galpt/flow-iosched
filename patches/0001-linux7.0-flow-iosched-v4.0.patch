@@ -1,21 +1,24 @@
-        From Galih Tama <galpt@v.recipes>  Mon May 18 06:46:44 2026 +0000
-        From: Galih Tama <galpt@v.recipes>
-        Date: Mon May 18 06:46:44 2026 +0000
-        Subject: [PATCH] flow-iosched: add v4.0 multi-lane I/O scheduler
+From: Galih Tama <galpt@v.recipes>
+Date: Mon May 18 07:04:48 2026 +0000
+Subject: [PATCH] flow-iosched: add v4.0 multi-lane I/O scheduler
 
-        Add the Multi-Lane I/O scheduler (FLOW) v4.0 to the kernel block layer.
-FLOW is a three-lane (Emergency / Read / Write) I/O scheduler with per-
-hw-context FIFO dispatch, starvation- bounded anti-starvation, zero per-
-request dynamic allocations, and no autotune.  Architecture highlights:
-- Per-hw-context state with independent locking   - Zero per-request
-dynamic allocations   - Completion-triggered re-dispatch   - Starvation-
-bounded dispatch via bypass_count counters   - Full front-merge and bio-
-merge support
+    Add the Multi-Lane I/O scheduler (FLOW) v4.0 to the kernel
+    block layer.  FLOW is a three-lane (Emergency / Read / Write)
+    I/O scheduler with per-hw-context FIFO dispatch, starvation-
+    bounded anti-starvation, zero per-request dynamic allocations,
+    and no autotune.
+    
+    Architecture highlights:
+      - Per-hw-context state with independent locking
+      - Zero per-request dynamic allocations
+      - Completion-triggered re-dispatch
+      - Starvation-bounded dispatch via bypass_count counters
+      - Full front-merge and bio-merge support
 
+     3 file(s) changed, 827 insertions(+), 0 deletions(-)
 
- 3 file(s) changed, 827 insertions(+), 0 deletions(-)
-        Signed-off-by: Galih Tama <galpt@v.recipes>
-        ---
+    Signed-off-by: Galih Tama <galpt@v.recipes>
+    ---
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644

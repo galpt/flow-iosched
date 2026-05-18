@@ -104,19 +104,26 @@ def fmt_timestamp() -> str:
 
 
 def patch_header(subject: str, desc: str, extra: str = "") -> str:
-    """Return the standard git-format-patch header block."""
-    return textwrap.dedent(f"""\
-        From {AUTHOR}  {fmt_timestamp()}
-        From: {AUTHOR}
-        Date: {fmt_timestamp()}
-        Subject: {subject}
+    """Return the patch header block (RFC 5322-style, no mbox From line).
 
-        {textwrap.fill(desc, width=72)}
-
-        {extra}
-        Signed-off-by: {AUTHOR}
-        ---
-    """)
+    Indentation is handled explicitly per-section so that ``textwrap.dedent``
+    is not required — this avoids bugs when multi-line ``desc`` or ``extra``
+    content has inconsistent leading whitespace.
+    """
+    header = f"From: {AUTHOR}\n"
+    header += f"Date: {fmt_timestamp()}\n"
+    header += f"Subject: {subject}\n"
+    header += "\n"
+    for line in desc.splitlines():
+        header += f"    {line}\n"
+    header += "\n"
+    if extra:
+        for line in extra.splitlines():
+            header += f"    {line}\n"
+        header += "\n"
+    header += f"    Signed-off-by: {AUTHOR}\n"
+    header += "    ---\n"
+    return header
 
 
 def diff_new_file(path: str, content: bytes) -> str:
@@ -375,7 +382,7 @@ def build_patch_0001(verbose: bool = False) -> str:
               - Starvation-bounded dispatch via bypass_count counters
               - Full front-merge and bio-merge support
         """),
-        extra=f"\n{stats}",
+        extra=stats,
     ))
 
     parts.append(new_file_diff)
