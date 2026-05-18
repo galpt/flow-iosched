@@ -1,14 +1,31 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Multi-Lane I/O Scheduler (FLOW) — v3.1 LSB
+ * Multi-Lane I/O Scheduler (FLOW) — v3.2 LSB
  *
- * Provably starvation-free N-lane dispatch via per-lane bypass_count/
- * max_bypass counters.  No autotune, no per-process state.
- * Starvation invariant: each lane L[i] served at most starvation_max[i]
- * consecutive dispatch cycles apart.  Reduces to mq-deadline when N=2.
+ * Per-lane starvation-bounded dispatch via bypass_count / starvation_max
+ * counters, generalising mq-deadline's writes_starved to N lanes.
  *
- * Removed: budget containment (v3.0), autotune timer, ICQ state,
- * completion_window_ns.  ~700 lines auditable in one sitting.
+ * Key differences from v3.1 LSB:
+ *  - One request per dispatch_request() call, matching the blk-mq contract
+ *    that all other I/O schedulers (mq-deadline, kyber, BFQ) obey.
+ *    Previously flow_fill_dispatch_locked() dequeued up to 24 requests
+ *    into an internal staging list per call, which (a) violated the
+ *    one-request contract, (b) pushed starvation counters ahead of
+ *    actual submission, and (c) hid requests from the hctx->dispatch
+ *    drain path on requeue.
+ *  - flow_has_work() no longer acquires fd->lock; uses lock-free hints
+ *    consistent with all other blk-mq schedulers.
+ *  - q->async_depth initialised in init_sched; limit_depth() uses the
+ *    standard data->q->async_depth directly instead of a hand-rolled
+ *    sbitmap-scaled computation.
+ *  - flow_free_sched_data() is empty (all cleanup done in exit_sched),
+ *    matching the mq-deadline and BFQ pattern and fixing a double-free
+ *    on elevator switch.
+ *  - flow_insert_request() returns false when rq->elv.priv[0] is NULL
+ *    (mempool exhaustion in prepare_request), so the request is
+ *    terminated with BLK_STS_IOERR instead of being silently dropped.
+ *
+ * ~630 lines, auditable in a single sitting.
  */
 
 #include <linux/bio.h>
@@ -29,7 +46,7 @@
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 
-#define FLOW_VERSION "3.1"
+#define FLOW_VERSION "3.2"
 
 enum flow_lane {
 	FLOW_LANE_EMERGENCY	= 0,
@@ -44,7 +61,6 @@ enum flow_lane {
 #define FLOW_BATCH_MAX_READ_DEF		16
 #define FLOW_BATCH_MAX_WRITE_DEF	16
 #define FLOW_MAX_INSERTS		72
-#define FLOW_MAX_DELETES		24
 #define FLOW_ASYNC_DEPTH_RATIO		3
 
 struct flow_rq_data {
@@ -77,10 +93,16 @@ struct flow_data {
 	spinlock_t		lock;
 };
 
+/*
+ * Per-hctx state.  bypass_count[] tracks consecutive dispatch cycles in
+ * which the opposite lane was served; when it reaches starvation_max[] the
+ * starving lane is force-dispatched.  batch_remaining[] implements the
+ * batch-continuity hint (same lane up to batch_max) across consecutive
+ * dispatch_request() calls from the blk-mq dispatch loop.
+ */
 struct flow_hctx_data {
-	spinlock_t		lock;
-	struct list_head	dispatch_list;
 	u32			bypass_count[FLOW_NR_LANES];
+	u16			batch_remaining[FLOW_NR_LANES];
 	struct blk_mq_hw_ctx	*hctx;
 };
 
@@ -244,8 +266,15 @@ static bool flow_insert_request(struct blk_mq_hw_ctx *hctx,
 	u8 lane;
 
 	lockdep_assert_held(&fd->lock);
+
+	/*
+	 * mempool exhaustion in flow_prepare_request leaves priv[0] NULL.
+	 * Return failure so the caller terminates the request cleanly
+	 * rather than silently dropping it.
+	 */
 	if (!rd)
-		return true;
+		return false;
+
 	rd->block_size = blk_rq_bytes(rq);
 	if (blk_mq_sched_try_insert_merge(hctx->queue, rq, free))
 		return true;
@@ -319,78 +348,151 @@ static void flow_finish_request(struct request *rq)
 	}
 }
 
+/*
+ * requeue_request is a no-op: once a request has been removed from the
+ * scheduler's data structures (in flow_dispatch_request), any requeue
+ * (e.g. BLK_STS_RESOURCE) is handled by the blk-mq core which moves it
+ * to hctx->dispatch.  The per-request metadata remains valid through
+ * eventual completion / finish_request.  This matches the behaviour of
+ * mq-deadline.
+ */
 static void flow_requeue_request(struct request *rq) { (void)rq; }
 
-static bool flow_fill_dispatch_locked(struct flow_data *fd,
-				      struct flow_hctx_data *khd)
+/*
+ * Select the dispatch lane via starvation-bound + batch logic.
+ *
+ * Priority:
+ *  1. Starving write lane  (bypass_count[W] >= starvation_max[W])
+ *  2. Starving read lane   (bypass_count[R] >= starvation_max[R])
+ *  3. Normal read batch    (batch_remaining[R] > 0)
+ *  4. New read batch       (first read in a group)
+ *  5. Normal write batch   (batch_remaining[W] > 0)
+ *  6. New write batch      (first write in a group)
+ *  7. FLOW_NR_LANES        (no work)
+ *
+ * batch_remaining tracks continuity across dispatch_request() calls on
+ * the same hctx, avoiding gratuitous lane switching within batch_max.
+ */
+static u8 flow_select_lane(struct flow_data *fd, struct flow_hctx_data *khd)
 {
-	lockdep_assert_held(&fd->lock);
-	u32 rd_c = 0, wr_c = 0;
 	u32 *bc = khd->bypass_count;
-	bool filled = false;
 
-	for (int i = 0; i < FLOW_MAX_DELETES; i++) {
-		struct request *rq;
-		u8 lane;
+	lockdep_assert_held(&fd->lock);
 
-		if (bc[FLOW_LANE_WRITE] >= fd->starvation_max[FLOW_LANE_WRITE] &&
-		    flow_first_rq(fd, FLOW_LANE_WRITE)) {
-			lane = FLOW_LANE_WRITE;
-			rq = flow_first_rq(fd, lane);
-		} else if (bc[FLOW_LANE_READ] >= fd->starvation_max[FLOW_LANE_READ] &&
-			   flow_first_rq(fd, FLOW_LANE_READ)) {
-			lane = FLOW_LANE_READ;
-			rq = flow_first_rq(fd, lane);
-		} else if (rd_c < fd->batch_max_read &&
-			   (rq = flow_first_rq(fd, FLOW_LANE_READ))) {
-			lane = FLOW_LANE_READ;
-		} else if (wr_c < fd->batch_max_write &&
-			   (rq = flow_first_rq(fd, FLOW_LANE_WRITE))) {
-			lane = FLOW_LANE_WRITE;
-		} else {
-			break;
-		}
-		if (!rq) break;
-		flow_remove_request(fd, rq, rq->q);
-		spin_lock(&khd->lock);
-		list_add_tail(&rq->queuelist, &khd->dispatch_list);
-		spin_unlock(&khd->lock);
-		if (bc[FLOW_LANE_READ] >= fd->starvation_max[FLOW_LANE_READ] ||
-		    bc[FLOW_LANE_WRITE] >= fd->starvation_max[FLOW_LANE_WRITE]) {
-			bc[FLOW_LANE_READ] = 0;
-			bc[FLOW_LANE_WRITE] = 0;
-		} else if (lane == FLOW_LANE_READ) {
-			rd_c++; bc[FLOW_LANE_WRITE]++;
-		} else {
-			wr_c++; bc[FLOW_LANE_READ]++;
-		}
-		filled = true;
+	/* 1. Starvation overrides — check lower-priority lane first */
+	if (bc[FLOW_LANE_WRITE] >= fd->starvation_max[FLOW_LANE_WRITE] &&
+	    flow_first_rq(fd, FLOW_LANE_WRITE))
+		return FLOW_LANE_WRITE;
+
+	if (bc[FLOW_LANE_READ] >= fd->starvation_max[FLOW_LANE_READ] &&
+	    flow_first_rq(fd, FLOW_LANE_READ))
+		return FLOW_LANE_READ;
+
+	/* 2. Continue existing batch or start a new one */
+	if (khd->batch_remaining[FLOW_LANE_READ] > 0 &&
+	    flow_first_rq(fd, FLOW_LANE_READ)) {
+		khd->batch_remaining[FLOW_LANE_READ]--;
+		return FLOW_LANE_READ;
 	}
-	return filled;
+
+	if (flow_first_rq(fd, FLOW_LANE_READ)) {
+		khd->batch_remaining[FLOW_LANE_READ] =
+			fd->batch_max_read - 1;
+		khd->batch_remaining[FLOW_LANE_WRITE] = 0;
+		return FLOW_LANE_READ;
+	}
+
+	if (khd->batch_remaining[FLOW_LANE_WRITE] > 0 &&
+	    flow_first_rq(fd, FLOW_LANE_WRITE)) {
+		khd->batch_remaining[FLOW_LANE_WRITE]--;
+		return FLOW_LANE_WRITE;
+	}
+
+	if (flow_first_rq(fd, FLOW_LANE_WRITE)) {
+		khd->batch_remaining[FLOW_LANE_WRITE] =
+			fd->batch_max_write - 1;
+		khd->batch_remaining[FLOW_LANE_READ] = 0;
+		return FLOW_LANE_WRITE;
+	}
+
+	return FLOW_NR_LANES;
 }
 
+/*
+ * Update starvation counters after dispatching a request from @lane.
+ *
+ * When a lane was force-dispatched because its bypass_count reached
+ * starvation_max, all counters (and batch state) are reset — the
+ * anti-starvation debt is paid.  Otherwise the opposite lane's bypass
+ * counter is incremented.
+ */
+static void flow_update_starvation(struct flow_data *fd,
+				   struct flow_hctx_data *khd, u8 lane)
+{
+	u32 *bc = khd->bypass_count;
+
+	lockdep_assert_held(&fd->lock);
+
+	if ((lane == FLOW_LANE_WRITE &&
+	     bc[FLOW_LANE_WRITE] >= fd->starvation_max[FLOW_LANE_WRITE]) ||
+	    (lane == FLOW_LANE_READ &&
+	     bc[FLOW_LANE_READ] >= fd->starvation_max[FLOW_LANE_READ])) {
+		/* Starvation serviced — reset everything */
+		bc[FLOW_LANE_READ] = 0;
+		bc[FLOW_LANE_WRITE] = 0;
+		khd->batch_remaining[FLOW_LANE_READ] = 0;
+		khd->batch_remaining[FLOW_LANE_WRITE] = 0;
+	} else if (lane == FLOW_LANE_READ) {
+		bc[FLOW_LANE_WRITE]++;
+	} else {
+		bc[FLOW_LANE_READ]++;
+	}
+}
+
+/*
+ * Dispatch exactly one request, obeying the blk-mq dispatch contract
+ * that all stable I/O schedulers (mq-deadline, kyber, BFQ) follow.
+ *
+ * Returns NULL when no work is available; the blk-mq dispatch loop
+ * (__blk_mq_do_dispatch_sched) handles the budget release.
+ */
 static struct request *flow_dispatch_request(struct blk_mq_hw_ctx *hctx)
 {
 	struct flow_data *fd = hctx->queue->elevator->elevator_data;
 	struct flow_hctx_data *khd = hctx->sched_data;
 	struct request *rq;
-	unsigned long flags;
+	u8 lane;
 
 	guard(spinlock_irqsave)(&fd->lock);
+
+	/* 1. Priority queues drained unconditionally before rbtrees */
 	for (int i = 0; i < 2; i++)
 		if (!list_empty(&fd->prio_queue[i])) {
 			rq = list_first_entry(&fd->prio_queue[i],
-				struct request, queuelist);
+					      struct request, queuelist);
 			list_del_init(&rq->queuelist);
 			return rq;
 		}
-	flow_fill_dispatch_locked(fd, khd);
-	spin_lock_irqsave(&khd->lock, flags);
-	rq = list_first_entry_or_null(&khd->dispatch_list, struct request,
-				      queuelist);
-	if (rq)
-		list_del_init(&rq->queuelist);
-	spin_unlock_irqrestore(&khd->lock, flags);
+
+	/* 2. Select lane via starvation-bound + batch logic */
+	lane = flow_select_lane(fd, khd);
+	if (lane >= FLOW_NR_LANES)
+		return NULL;
+
+	/* 3. Pick the earliest-deadline request from the selected lane */
+	rq = flow_first_rq(fd, lane);
+	if (!rq)
+		return NULL;
+
+	/* 4. Remove from scheduler data structures atomically with lane
+	 *    selection — the request now belongs to the blk-mq dispatch
+	 *    path and will be submitted to the driver or requeued to
+	 *    hctx->dispatch. */
+	flow_remove_request(fd, rq, rq->q);
+
+	/* 5. Update starvation counters */
+	flow_update_starvation(fd, khd, lane);
+
 	return rq;
 }
 
@@ -401,15 +503,13 @@ static void flow_depth_updated(struct request_queue *q)
 
 static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 {
-	struct sbitmap_queue *bt;
-	unsigned int qdepth;
-
+	/*
+	 * Throttle async (non-sync-read) submissions to async_depth.
+	 * This matches the approach used by mq-deadline and kyber.
+	 */
 	if (blk_mq_is_sync_read(opf))
 		return;
-	qdepth = data->q->nr_requests / FLOW_ASYNC_DEPTH_RATIO;
-	bt = &data->hctx->sched_tags->bitmap_tags;
-	data->shallow_depth = ((qdepth << bt->sb.shift) +
-		data->q->nr_requests - 1) / data->q->nr_requests;
+	data->shallow_depth = data->q->async_depth;
 }
 
 static bool flow_allow_merge(struct request_queue *q, struct request *rq,
@@ -432,18 +532,18 @@ static bool flow_allow_merge(struct request_queue *q, struct request *rq,
 	return rq_lane == bio_lane;
 }
 
+/*
+ * Lock-free work hint: checks simple pointer/list state without taking
+ * fd->lock.  blk-mq tolerates false negatives (a brief delay before the
+ * next dispatch cycle); false positives are harmless (dispatch_request
+ * returns NULL, loop exits).
+ */
 static bool flow_has_work(struct blk_mq_hw_ctx *hctx)
 {
 	struct flow_data *fd = hctx->queue->elevator->elevator_data;
-	struct flow_hctx_data *khd = hctx->sched_data;
 
-	if (!khd)
-		return false;
-	if (!list_empty_careful(&khd->dispatch_list))
-		return true;
-	guard(spinlock_irqsave)(&fd->lock);
-	return !list_empty(&fd->prio_queue[0]) ||
-	       !list_empty(&fd->prio_queue[1]) ||
+	return !list_empty_careful(&fd->prio_queue[0]) ||
+	       !list_empty_careful(&fd->prio_queue[1]) ||
 	       !RB_EMPTY_ROOT(&fd->read_root.rb_root) ||
 	       !RB_EMPTY_ROOT(&fd->write_root.rb_root);
 }
@@ -487,6 +587,15 @@ static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)
 	eq->elevator_data = fd;
 	q->elevator = eq;
 	blk_queue_flag_clear(QUEUE_FLAG_SQ_SCHED, q);
+
+	/*
+	 * Initialise async_depth so that flow_limit_depth() and
+	 * flow_depth_updated() use a consistent value, matching the
+	 * pattern of mq-deadline (nr_requests), kyber (75%), BFQ (75%).
+	 */
+	q->async_depth = q->nr_requests / FLOW_ASYNC_DEPTH_RATIO;
+	flow_depth_updated(q);
+
 	fd->queue = q;
 	blk_stat_enable_accounting(q);
 	return 0;
@@ -556,8 +665,6 @@ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int idx)
 	khd = kzalloc_node(sizeof(*khd), GFP_KERNEL, hctx->numa_node);
 	if (!khd)
 		return -ENOMEM;
-	spin_lock_init(&khd->lock);
-	INIT_LIST_HEAD(&khd->dispatch_list);
 	khd->hctx = hctx;
 	hctx->sched_data = khd;
 	return 0;
@@ -566,14 +673,9 @@ static int flow_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int idx)
 static void flow_exit_hctx(struct blk_mq_hw_ctx *hctx, unsigned int idx)
 {
 	struct flow_hctx_data *khd = hctx->sched_data;
-	struct request *rq, *n;
 
 	if (!khd)
 		return;
-	list_for_each_entry_safe(rq, n, &khd->dispatch_list, queuelist) {
-		list_del_init(&rq->queuelist);
-		blk_mq_end_request(rq, BLK_STS_IOERR);
-	}
 	kfree(khd);
 	hctx->sched_data = NULL;
 }
@@ -651,10 +753,14 @@ static void *flow_alloc_sched_data(struct request_queue *q)
 	return kzalloc_node(sizeof(struct flow_data), GFP_KERNEL, q->node);
 }
 
-static void flow_free_sched_data(void *elv_data)
-{
-	kfree(elv_data);
-}
+/*
+ * All cleanup (mempool/slab teardown, kfree) is done in flow_exit_sched.
+ * This empty free_sched_data prevents a double-free during elevator switch
+ * when the core calls both exit_sched and free_sched_data on the old
+ * elevator.  Cf. mq-deadline and BFQ which do not register free_sched_data
+ * at all for the same reason.
+ */
+static void flow_free_sched_data(void *elv_data) { }
 
 static struct elevator_type mq_flow = {
 	.ops = {
