@@ -57,14 +57,14 @@ insert_flags. Returns a lane
 
     B1 --> N3{"3. Which Lane?"}
 
-    N3 -- "AT_HEAD bypass?\n→ Emergency (Tier 0)" --> C1["Emergency
+    N3 -- "AT_HEAD bypass?\n→ Emergency" --> C1["Emergency
 
 BLK_MQ_INSERT_AT_HEAD bypass.
 Queued in prio_queue[0] for
 immediate, unconditional dispatch.
 No FIFO — pure direct list."]
 
-    N3 -- "Sync read, REQ_META,\nREQ_PRIO, or ≤ 4 KB?\n→ Read (Tier 1)" --> D1["Read
+    N3 -- "Sync read, REQ_META,\nREQ_PRIO, or ≤ 4 KB?\n→ Read" --> D1["Read
 
 Sync reads, metadata, priority,
 and small writes ≤ 4 KB.
@@ -73,7 +73,7 @@ by insertion); sector-sorted rbtree
 for merge lookups only.
 Async depth: nr_requests / 3."]
 
-    N3 -- "Async write or\nbest-effort I/O?\n→ Write (Tier 2)" --> F1["Write
+    N3 -- "Async write or\nbest-effort I/O?\n→ Write" --> F1["Write
 
 Async writes and best-effort I/O.
 Large deadline window (2000 ms).
@@ -82,33 +82,31 @@ structure as Read lane.
 Dispatched after Read lane or
 when starvation forces it."]
 
-    C1 -->|"Immediate: prio_queue[0]\ndrained first every cycle"| H1["4. Per-hctx Dispatch
+    C1 -->|"drain prio_queue[0]"| H1["4. Per-hctx Dispatch
 
 flow_dispatch_request(hctx):
 1. Pop Emergency/barrier prio queue
    (under fd->lock, shared)
 2. Select lane via starvation-bound
-   + batch logic (under khd->lock,
-   per-hctx — no contention with
-   other hctx on the same device)
+   + batch logic (under khd->lock)
 3. Pop one request from the
    selected lane's FIFO, remove
    from rbtree
 Two-phase locking.  QUEUE_FLAG_SQ_SCHED
 cleared."]
 
-    D1 -->|"Batch: up to batch_max_read (16)\nper dispatch cycle"| H1
+    D1 -->|"batch ≤ batch_max_read"| H1
 
-    F1 -->|"Within batch_max_write (16)\nor when starvation forces it"| H1
+    F1 -->|"batch ≤ batch_max_write\nor starved"| H1
 
-    H1 -->|"Request submitted\nto hardware queue"| I1["5. Device
+    H1 -->|"submit to device"| I1["5. Device
 
 NVMe, SATA, or virtual device.
 Multiple hardware queues (hctx).
-Each hctx dispatches independently
+Each dispatches independently
 with its own lock."]
 
-    D1 -.->|"Read dispatched\n→ bypass_count[Write]++"| K1["Starvation-Bound
+    D1 -.->|"Read→bc[W]++"| K1["Starvation-Bound
 Counters
 
 bypass_count[Read/Write]
@@ -117,9 +115,9 @@ force-dispatch.
 Generalised mq-deadline
 writes_starved for N lanes."]
 
-    F1 -.->|"Write dispatched\n→ bypass_count[Read]++"| K1
+    F1 -.->|"Write→bc[R]++"| K1
 
-    K1 -.->|"bypass_count[L] ≥ starvation_max[L]?\n→ Force-dispatch lane L,\nreset all counters"| H1
+    K1 -.->|"bc[L]≥max?\nforce L, reset all"| H1
 
     style Start fill:#1e293b,stroke:#0ea5e9,stroke-width:2,color:#fff
     style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2,color:#1e293b
