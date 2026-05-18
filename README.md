@@ -270,11 +270,11 @@ An undetected bug can cause data corruption or filesystem inconsistency —
 not merely degraded performance.
 
 > [!NOTE]
-> flow-iosched clears `QUEUE_FLAG_SQ_SCHED` and dispatches independently per
-> hardware context.  This avoids the single-queue dispatch bottleneck that
-> restricts throughput on high-end NVMe with 16 or more queues — a framework
-> constraint that some other blk-mq schedulers (mq-deadline, BFQ) still
-> inherit by using single-queue dispatch mode.
+> flow-iosched clears `QUEUE_FLAG_SQ_SCHED` so each hardware context
+> dispatches independently.  Schedulers that keep this flag set
+> (mq-deadline, BFQ) serialise dispatch through a single queue-level
+> context — a trade-off that keeps their data structures global rather
+> than per-hctx.
 
 ## Benchmarks
 
