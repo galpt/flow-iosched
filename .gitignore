@@ -1,4 +1,5 @@
 block/elevator.h
+__pycache__/
 *.cmd
 *.ko
 *.mod
