@@ -1,6 +1,6 @@
-        From Galih Tama <galpt@v.recipes>  Mon May 18 06:32:18 2026 +0000
+        From Galih Tama <galpt@v.recipes>  Mon May 18 06:46:44 2026 +0000
         From: Galih Tama <galpt@v.recipes>
-        Date: Mon May 18 06:32:18 2026 +0000
+        Date: Mon May 18 06:46:44 2026 +0000
         Subject: [PATCH] flow-iosched: compat for 6.12-6.17 init_sched API
 
         Kernels 6.12 through 6.17 use an older init_sched elevator op signature:
@@ -16,10 +16,10 @@ error path.
         ---
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index 67d9ad99c8..f6d10b1826 100644
+index f51f28c988..aaef9be917 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -609,12 +609,20 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
+@@ -600,12 +600,20 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
  
  /* ── Init / exit ───────────────────────────────────────────────── */
  

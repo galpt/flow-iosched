@@ -27,7 +27,8 @@
  *    following BFQ's pipeline-refill pattern.
  *  - Lock-free has_work() follows kyber's pattern.
  *
- * ~450 lines, fully auditable in a single sitting.
+ * ~450 lines of core logic, ~350 lines of sysfs/registration boilerplate.
+ * Fully auditable in a single sitting.
  */
 
 #include <linux/bio.h>
@@ -40,9 +41,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/rbtree.h>
-#include <linux/sbitmap.h>
 #include <linux/slab.h>
-#include <linux/version.h>
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
@@ -123,16 +122,6 @@ static inline bool flow_rq_has_lane(struct request *rq)
 static inline bool rq_is_sync_read(struct request *rq)
 {
 	return (req_op(rq) == REQ_OP_READ) && (rq->cmd_flags & REQ_SYNC);
-}
-
-static u64 flow_deadline_ns(struct request *rq, u8 lane)
-{
-	if (lane == FLOW_LANE_READ) {
-		if (req_op(rq) != REQ_OP_READ && blk_rq_bytes(rq) <= 4096)
-			return rq->start_time_ns + (2ULL * NSEC_PER_MSEC);
-		return rq->start_time_ns;
-	}
-	return rq->start_time_ns + (2000ULL * NSEC_PER_MSEC);
 }
 
 static u8 flow_assign_lane(struct request *rq, blk_insert_t flags)
@@ -428,10 +417,12 @@ static void flow_finish_request(struct request *rq)
 
 static void flow_requeue_request(struct request *rq)
 {
-	/* Once removed from scheduler structures in dispatch_request,
+	/*
+	 * Once removed from scheduler structures in dispatch_request,
 	 * the request belongs to the blk-mq core.  requeue moves it
 	 * to hctx->dispatch; finish_request eventually clears priv[0].
-	 * This matches mq-deadline's behaviour. */
+	 * This matches mq-deadline's behaviour.
+	 */
 	(void)rq;
 }
 

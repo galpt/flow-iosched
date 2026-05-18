@@ -2,27 +2,18 @@ config MQ_IOSCHED_FLOW
 	tristate "Multi-Lane I/O scheduler (FLOW)"
 	default m
 	help
-	  The Multi-Lane I/O scheduler (FLOW) v3.1 LSB is a blk-mq I/O
+	  The Multi-Lane I/O scheduler (FLOW) v4.0 is a blk-mq I/O
 	  scheduler with three priority tiers (Emergency > Read > Write),
-	  deadline-sorted rbtree dispatch, and a generalised N-lane
+	  per-hw-context FIFO dispatch, and a generalised N-lane
 	  starvation-bound framework (starvation_max_read / starvation_max_write)
 	  that is provably starvation-free by construction.
 
-	  Lane-Starvation Bounding (LSB) refactor:
-	    - Formal starvation-bound dispatch with per-lane max_bypass/
-	      bypass_count counters (generalises mq-deadline to N lanes)
-	    - No autotune timer (static parameters, like mq-deadline)
-	    - No per-process scheduling state
-	    - ~700 lines, auditable in a single sitting
-
-	  Removed in v3.1:
-	    - Per-process budget containment (caused permanent write starvation
-	      under sequential write loads — the budget refill formula
-	      sectors/100 returned 0 for all I/Os < 50 KB, and the 100ms idle
-	      safety valve never fired during continuous writes)
-	    - 3-mode autotune timer (unproven benefit; mq-deadline uses static
-	      parameters and works correctly across all workloads)
-	    - Per-ICQ state (last_io_completed was not read by scheduling path)
+	  Architecture highlights:
+	    - Per-hw-context state with independent locking (kyber-like scaling)
+	    - Zero per-request dynamic allocations (mq-deadline discipline)
+	    - Completion-triggered re-dispatch (BFQ pipeline-refill pattern)
+	    - Starvation-bounded dispatch via bypass_count/starvation_max counters
+	    - No autotune timer, no per-process scheduling state
 
 config MQ_IOSCHED_DEFAULT_FLOW
 	bool "Enable FLOW I/O scheduler as the default MQ scheduler"
@@ -31,5 +22,5 @@ config MQ_IOSCHED_DEFAULT_FLOW
 	  Make flow-iosched the default MQ I/O scheduler.  Note: this
 	  requires wiring into elevator_set_default() in block/elevator.c,
 	  which is kernel-version-specific and is NOT handled by this
-	  patch.  For most users, the standalone module install script
-	  (install-flow-iosched.sh) is the recommended approach.
+	  patch.  For most users, the standalone module build (via the
+	  install-flow-iosched.sh script) is the recommended approach.

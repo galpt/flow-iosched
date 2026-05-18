@@ -12,9 +12,9 @@
 #   ./build-kernel.sh 6.12     # Build upstream 6.12 with compat patch
 #
 # Supported kernel ranges:
-#   7.0.x         — applies 0001 (v3.1) patch
-#   6.18 – 6.19   — applies 0001 (v3.1) patch
-#   6.12 – 6.17   — applies 0001 (v3.1) + 0002 compat patches
+#   7.0.x         — applies 0001 (v4.0) patch
+#   6.18 – 6.19   — applies 0001 (v4.0) patch
+#   6.12 – 6.17   — applies 0001 (v4.0) + 0002 compat patches
 #   5.18 – 6.11   — NOT supported (elevator op API differs)
 #
 # The script:
@@ -41,7 +41,7 @@ set -euo pipefail
 : "${FLOW_PATCH_DIR:=""}"          # Auto-detected from script location; falls back to cloned repo
 : "${FLOW_REPO_DIR:=""}"          # Default: ./tmp/repo/ (auto-detected from script location)
 : "${FLOW_REPO_URL:="https://github.com/galpt/flow-iosched"}"
-: "${FLOW_REPO_BRANCH:="main"}"
+: "${FLOW_REPO_BRANCH:="v4.0"}"
 : "${FLOW_MAKE_JOBS:="$(nproc)"}"  # Parallel build jobs
 
 # ── Global state ──────────────────────────────────────────────────────
@@ -357,8 +357,8 @@ apply_patches() {
     local patches_to_apply=()
 
     # 0001 is always applied for all supported versions
-    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v3.1.patch" ]; then
-        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v3.1.patch")
+    if [ -f "$patch_dir/0001-linux7.0-flow-iosched-v4.0.patch" ]; then
+        patches_to_apply+=("$patch_dir/0001-linux7.0-flow-iosched-v4.0.patch")
     else
         # Fallback: try to match any 0001 patch (user may have renamed it)
         local fallback
@@ -366,7 +366,7 @@ apply_patches() {
         if [ -n "$fallback" ]; then
             patches_to_apply+=("$fallback")
         else
-            die "0001 patch not found in $patch_dir — expected 0001-linux7.0-flow-iosched-v3.1.patch"
+            die "0001 patch not found in $patch_dir — expected 0001-linux7.0-flow-iosched-v4.0.patch"
         fi
     fi
 
@@ -388,7 +388,7 @@ apply_patches() {
         local cached_version
         cached_version=$(grep '#define FLOW_VERSION' block/flow-iosched.c 2>/dev/null | cut -d'"' -f2)
         local patch_version
-        patch_version=$(grep '#define FLOW_VERSION' "$patch_dir"/0001-linux7.0-flow-iosched-v3.1.patch 2>/dev/null | head -1 | cut -d'"' -f2)
+        patch_version=$(grep '#define FLOW_VERSION' "$patch_dir"/0001-linux7.0-flow-iosched-v4.0.patch 2>/dev/null | head -1 | cut -d'"' -f2)
         if [ -n "$cached_version" ] && [ -n "$patch_version" ] && [ "$cached_version" != "$patch_version" ]; then
             info "Cached flow-iosched v$cached_version differs from patch v$patch_version — re-patching."
             rm -f block/flow-iosched.c

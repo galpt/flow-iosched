@@ -167,12 +167,11 @@ that do not fit in the flowchart:
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested** — dedicated compat patches would be needed for this range. |
 
 > [!IMPORTANT]
-> The `patches/` directory ships patches for v3.x; the v4.0 source
-> has been restructured (removed mempools, slab caches, and the
-> `flow_rq_data` / `dl_group` allocations) and the patches have not
-> yet been regenerated.  The preferred build method is the standalone
-> module build (see below), which does not require patching the kernel
-> tree.
+> The `patches/` directory contains generated patches for in-tree
+> integration.  After any source change, run
+> `./bench-tests/generate-patches.py` to keep them in sync.
+> The preferred build method is the standalone module build (see
+> below), which does not require patching the kernel tree.
 
 ### Standalone Module Build (Recommended)
 
@@ -214,7 +213,7 @@ config MQ_IOSCHED_FLOW
     default m
     help
       Multi-lane I/O scheduler with three priority tiers (Emergency,
-      Read, Write), deadline-sorted rbtree dispatch, and starvation-bound
+      Read, Write), per-hw-context FIFO dispatch, and starvation-bound
       anti-starvation (generalised mq-deadline for N lanes).
 
 // Makefile (in block/Makefile):
@@ -303,10 +302,10 @@ work per I/O — and that overhead matters on real hardware too.
 
 | Chart | What to look for |
 |-------|-------------------|
-| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** — higher is better.  The v3.0/v3.1 simplification narrowed the read gap to kyber and mq-deadline compared to v2.0.  Writes remain slower, which is expected: writes use a 2000 ms deadline window (Write lane) while reads use the FIFO Read lane.  BFQ's per-process accounting keeps it at the bottom on this zero-latency device — a reminder that scheduling always costs something. |
+| ![IOPS](benchmark-runs/null_blk/charts/iops.png) | **Total IOPS** — higher is better.  Writes remain slower than reads on null_blk, which is expected: writes use a 2000 ms deadline window (Write lane) while reads use the FIFO Read lane.  BFQ's per-process accounting keeps it at the bottom on this zero-latency device — a reminder that scheduling always costs something. |
 | ![Latency](benchmark-runs/null_blk/charts/latency.png) | **Read latency** — lower is better.  flow-iosched read latency is competitive with kyber and mq-deadline across all read-bearing workloads.  Write-only workloads naturally have no read latency bars. |
 | ![Per-workload IOPS](benchmark-runs/null_blk/charts/per_workload.png) | **Per-workload breakdown** — every workload sorted best-to-worst for that specific workload.  flow-iosched sits mid-pack on reads; writes trail the leaders, which is the honest picture of where the scheduler stands today on synthetic zero-latency media. |
-| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Averages across all workloads** — one glance at the spread.  flow-iosched lands mid-pack on IOPS and read latency, with write latency still the area needing most improvement.  The v3.0/v3.1 re-architecture did not materially change this picture. |
+| ![Consolidated averages](benchmark-runs/null_blk/charts/comparison.png) | **Averages across all workloads** — one glance at the spread.  flow-iosched lands mid-pack on IOPS and read latency, with write latency still the area needing most improvement.  The v4.0 re-architecture (per-hctx locks, zero allocations) may change this picture — benchmarks have not yet been re-run. |
 
 > [!NOTE]
 > **Why are writes slower?**  flow-iosched classifies writes as background
@@ -397,7 +396,7 @@ The script:
 1. Downloads the kernel tarball from `cdn.kernel.org` and caches it in
    `./tmp/kernels/` (relative to the script)
 2. Extracts the source (skipped if already present)
-3. Clones the flow-iosched repo for patches if no local [`patches/`](https://github.com/galpt/flow-iosched/tree/main/patches) directory
+3. Clones the flow-iosched repo for patches if no local [`patches/`](https://github.com/galpt/flow-iosched/tree/v4.0/patches) directory
    is found — no need to download the repo manually
 4. Applies the correct patches for the target kernel version
 5. Configures using the running kernel's `.config` as baseline with
