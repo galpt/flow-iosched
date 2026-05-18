@@ -421,6 +421,38 @@ The script:
 > and patching — it proceeds straight to configuration, build, and install.
 > This makes rebuilds fast after source-code changes during development.
 
+#### `generate-patches.py` — Regenerate kernel patches from current source
+
+Reads the live source files (`flow-iosched.c`, `Kconfig.iosched`, `Makefile`)
+from `block/` and produces ready-to-apply git-format patches in `patches/`.
+This guarantees that the patches always match the current code, eliminating
+stale-patch errors during in-tree kernel builds.
+
+```bash
+# Generate both patches (0001 + 0002) and validate they apply cleanly
+./bench-tests/generate-patches.py
+
+# Verify that existing patches still match the source (e.g. in CI)
+./bench-tests/generate-patches.py --check
+
+# Skip the patch-application dry-run test (faster iteration)
+./bench-tests/generate-patches.py --no-validate
+```
+
+The script:
+1. Reads the current `flow-iosched.c` and computes its git blob hash
+2. Constructs a `diff --git` new-file segment with correct header metadata
+3. Builds diff segments for `Kconfig.iosched` and `Makefile` against
+   template kernel source (inserting before `endmenu` and the `bfq-y`
+   line respectively)
+4. For the 0002 compat patch, transforms `flow_init_sched()` to the
+   older 6.12-6.17 API signature
+5. Optionally validates each patch with `patch --dry-run` against a
+   clean kernel tree
+
+**Dependencies:** `git` (for blob hash computation), `patch` (for
+validation). Falls back to Python `difflib` when `git` is unavailable.
+
 #### `run-benchmarks.sh` — Run fio benchmarks across schedulers
 
 Runs fio with a set of five workloads and compares the running kernel's
