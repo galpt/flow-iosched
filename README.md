@@ -57,67 +57,62 @@ insert_flags. Returns a lane
 
     B1 --> N3{"3. Which Lane?"}
 
-    N3 -- "AT_HEAD bypass?\n→ Emergency" --> C1["Emergency
+    D1["Read
 
-BLK_MQ_INSERT_AT_HEAD bypass.
-Queued in prio_queue[0] for
-immediate, unconditional dispatch.
-No FIFO — pure direct list."]
+Sync reads, metadata,
+priority, small writes.
+Per-hctx FIFO + rbtree.
+Async depth: nr_req / 3."]
 
-    N3 -- "Sync read, REQ_META,\nREQ_PRIO, or ≤ 4 KB?\n→ Read" --> D1["Read
+    K1["Starvation-Bound Counters
 
-Sync reads, metadata, priority,
-and small writes ≤ 4 KB.
-Per-hctx FIFO list (deadline-ordered
-by insertion); sector-sorted rbtree
-for merge lookups only.
-Async depth: nr_requests / 3."]
+bypass_count[Read/Write]
+reset on force-dispatch.
+Generalised mq-deadline
+writes_starved for N lanes."]
 
-    N3 -- "Async write or\nbest-effort I/O?\n→ Write" --> F1["Write
+    C1["Emergency
 
-Async writes and best-effort I/O.
-Large deadline window (2000 ms).
-Per-hctx FIFO + rbtree, same
-structure as Read lane.
-Dispatched after Read lane or
-when starvation forces it."]
+BLK_MQ_INSERT_AT_HEAD.
+prio_queue[0] — immediate,
+unconditional, no FIFO."]
+
+    F1["Write
+
+Async writes, best-effort.
+2000 ms deadline window.
+Per-hctx FIFO + rbtree.
+Dispatched when Read empty
+or starvation forces it."]
+
+    N3 -- "AT_HEAD?\n→ Emergency" --> C1
+    N3 -- "sync read, meta,\nprio, or ≤ 4 KB?\n→ Read" --> D1
+    N3 -- "async write or\nbest-effort?\n→ Write" --> F1
+
+    D1 -.->|"Read→bc[W]++"| K1
+    F1 -.->|"Write→bc[R]++"| K1
 
     C1 -->|"drain prio_queue[0]"| H1["4. Per-hctx Dispatch
 
 flow_dispatch_request(hctx):
-1. Pop Emergency/barrier prio queue
-   (under fd->lock, shared)
-2. Select lane via starvation-bound
-   + batch logic (under khd->lock)
-3. Pop one request from the
-   selected lane's FIFO, remove
-   from rbtree
-Two-phase locking.  QUEUE_FLAG_SQ_SCHED
-cleared."]
+1. Pop prio queue (fd->lock)
+2. Select lane via starvation
+   + batch (khd->lock)
+3. Pop one request from
+   lane FIFO, remove from rbtree
+Two-phase lock.  SQ_SCHED cleared."]
 
-    D1 -->|"batch ≤ batch_max_read"| H1
-
-    F1 -->|"batch ≤ batch_max_write\nor starved"| H1
+    D1 -->|"batch ≤ bmax_r"| H1
+    F1 -->|"batch ≤ bmax_w\nor starved"| H1
 
     H1 -->|"submit to device"| I1["5. Device
 
-NVMe, SATA, or virtual device.
-Multiple hardware queues (hctx).
-Each dispatches independently
-with its own lock."]
+NVMe, SATA, virtual.
+Multi-hctx.
+Each dispatches
+independently."]
 
-    D1 -.->|"Read→bc[W]++"| K1["Starvation-Bound
-Counters
-
-bypass_count[Read/Write]
-reset to 0 on any
-force-dispatch.
-Generalised mq-deadline
-writes_starved for N lanes."]
-
-    F1 -.->|"Write→bc[R]++"| K1
-
-    K1 -.->|"bc[L]≥max?\nforce L, reset all"| H1
+    K1 -.->|"bc[L]≥max?\nforce L, reset"| H1
 
     style Start fill:#1e293b,stroke:#0ea5e9,stroke-width:2,color:#fff
     style A1 fill:#eef2ff,stroke:#6366f1,stroke-width:2,color:#1e293b
