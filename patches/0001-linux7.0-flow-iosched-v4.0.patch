@@ -1,5 +1,5 @@
 From: Galih Tama <galpt@v.recipes>
-Date: Mon May 18 07:13:31 2026 +0000
+Date: Mon May 18 08:20:37 2026 +0000
 Subject: [PATCH] flow-iosched: add v4.0 multi-lane I/O scheduler
 
     Add the Multi-Lane I/O scheduler (FLOW) v4.0 to the kernel
@@ -15,17 +15,17 @@ Subject: [PATCH] flow-iosched: add v4.0 multi-lane I/O scheduler
       - Starvation-bounded dispatch via bypass_count counters
       - Full front-merge and bio-merge support
 
-     3 file(s) changed, 827 insertions(+), 0 deletions(-)
+     3 file(s) changed, 826 insertions(+), 0 deletions(-)
 
     Signed-off-by: Galih Tama <galpt@v.recipes>
     ---
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
 new file mode 100644
-index 0000000000..f51f28c98823370cd5455d58a5cf6b8a92755578
+index 0000000000..d201863a5ab3c52174a64f892fa29be25066df2f
 --- /dev/null
 +++ b/block/flow-iosched.c
-@@ -0,0 +1,799 @@
+@@ -0,0 +1,798 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Multi-Lane I/O Scheduler (FLOW) — v4.0
@@ -223,9 +223,6 @@ index 0000000000..f51f28c98823370cd5455d58a5cf6b8a92755578
 +
 +	lockdep_assert_held(&fd->lock);
 +
-+	if (!flow_rq_has_lane(rq))
-+		return false;
-+
 +	if (blk_mq_sched_try_insert_merge(hctx->queue, rq, free))
 +		return true;
 +
@@ -397,6 +394,8 @@ index 0000000000..f51f28c98823370cd5455d58a5cf6b8a92755578
 +		}
 +
 +	/* Phase 2: Lane dispatch (per-hctx locking). */
++	if (!khd)
++		return NULL;
 +	guard(spinlock_irqsave)(&khd->lock);
 +
 +	{

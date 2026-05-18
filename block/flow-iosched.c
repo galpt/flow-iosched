@@ -195,9 +195,6 @@ static bool flow_insert_request(struct blk_mq_hw_ctx *hctx,
 
 	lockdep_assert_held(&fd->lock);
 
-	if (!flow_rq_has_lane(rq))
-		return false;
-
 	if (blk_mq_sched_try_insert_merge(hctx->queue, rq, free))
 		return true;
 
@@ -369,6 +366,8 @@ static struct request *flow_dispatch_request(struct blk_mq_hw_ctx *hctx)
 		}
 
 	/* Phase 2: Lane dispatch (per-hctx locking). */
+	if (!khd)
+		return NULL;
 	guard(spinlock_irqsave)(&khd->lock);
 
 	{

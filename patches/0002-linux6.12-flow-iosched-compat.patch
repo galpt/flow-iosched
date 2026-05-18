@@ -1,5 +1,5 @@
 From: Galih Tama <galpt@v.recipes>
-Date: Mon May 18 07:13:31 2026 +0000
+Date: Mon May 18 08:20:37 2026 +0000
 Subject: [PATCH] flow-iosched: compat for 6.12-6.16 init_sched + depth_updated API
 
     Kernels 6.12 through 6.16 use two different elevator op
@@ -29,10 +29,10 @@ Subject: [PATCH] flow-iosched: compat for 6.12-6.16 init_sched + depth_updated A
     ---
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index f51f28c988..755b69b618 100644
+index d201863a5a..02742158ea 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
-@@ -586,9 +586,9 @@ static struct request *flow_next_request(struct request_queue *q,
+@@ -585,9 +585,9 @@ static struct request *flow_next_request(struct request_queue *q,
  
  /* ── Queue depth management ────────────────────────────────────── */
  
@@ -44,7 +44,7 @@ index f51f28c988..755b69b618 100644
  }
  
  static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
-@@ -600,12 +600,20 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
+@@ -599,12 +599,20 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
  
  /* ── Init / exit ───────────────────────────────────────────────── */
  
