@@ -441,19 +441,29 @@ def build_patch_0002(verbose: bool = False) -> str:
 
     parts = []
     parts.append(patch_header(
-        subject="[PATCH] flow-iosched: compat for 6.12-6.17 init_sched API",
-        desc="""Kernels 6.12 through 6.17 use an older init_sched elevator
-op signature:
+        subject="[PATCH] flow-iosched: compat for 6.12-6.16 init_sched + depth_updated API",
+        desc="""Kernels 6.12 through 6.16 use two different elevator op
+signatures compared with 6.18+ / 7.x:
 
-    int init_sched(struct request_queue *q, struct elevator_type *e)
+init_sched:
+    6.18+ / 7.x:  int init_sched(q, struct elevator_queue *eq)
+    6.12-6.16:    int init_sched(q, struct elevator_type *e)
 
-instead of the 6.18+ / 7.x signature:
+In the older API the scheduler must call elevator_alloc(q, e)
+and set elevator_data itself.  elevator_alloc on these kernels
+takes 2 arguments (not 3).
 
-    int init_sched(struct request_queue *q, struct elevator_queue *eq)
+depth_updated:
+    6.18+ / 7.x:  void depth_updated(struct request_queue *)
+    6.12-6.16:    void depth_updated(struct blk_mq_hw_ctx *)
 
-This patch adjusts flow_init_sched() to match the older API by
-allocating the elevator_queue and private data itself, and adding
-kobject_put on the error path.""",
+The older callback receives the hardware context and must
+derive the queue from it.
+
+Kernel 6.17 has the same init_sched signature as 6.18+ but still
+uses the older depth_updated(hctx).  No official compat patch is
+provided for 6.17 — apply the depth_updated hunk manually if
+needed.""",
     ))
 
     parts.append(diff_modify_file("block/flow-iosched.c", flow_c, flow_c_compat))
@@ -462,58 +472,99 @@ kobject_put on the error path.""",
 
 
 def _apply_compat_transforms(source: str) -> str:
-    """Apply the 6.12-6.17 compat transformations to *source*.
+    """Apply the 6.12-6.16 compat transformations to *source*.
+
+    Two API differences are handled:
+
+    1. ``init_sched`` signature:
+       - 6.12-6.16: ``int init_sched(q, struct elevator_type *e)``
+       - 6.17+ / 7.x: ``int init_sched(q, struct elevator_queue *eq)``
+
+       In the older API, ``elevator_alloc(q, e)`` takes 2 arguments
+       (q, e).  In 6.17+, the framework pre-allocates the elevator
+       and passes it directly.  The older API also does not set
+       ``eq->elevator_data`` before calling ``init_sched``, so we
+       must allocate and set it ourselves.
+
+    2. ``depth_updated`` signature:
+       - 6.12-6.17: ``void depth_updated(struct blk_mq_hw_ctx *)``
+       - 6.18+ / 7.x: ``void depth_updated(struct request_queue *)``
+
+       The callback receives the hw context and must derive the queue
+       from it.
 
     Returns the modified source, or the original if already in compat form.
     """
-    old_sig = "static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)"
-    new_sig = "static int flow_init_sched(struct request_queue *q, struct elevator_type *e)"
+    transformed = False
 
-    if new_sig in source:
-        # already in compat format — nothing to do
-        return source
+    # ── Transform 1: init_sched ────────────────────────────────────────
+    old_is_sig = "static int flow_init_sched(struct request_queue *q, struct elevator_queue *eq)"
+    new_is_sig = "static int flow_init_sched(struct request_queue *q, struct elevator_type *e)"
 
-    if old_sig not in source:
-        print(f"  {YELLOW}0002: cannot locate init_sched signature in source{NL}",
-              file=sys.stderr)
-        return source
+    if new_is_sig in source:
+        # already in init_sched compat format — skip
+        pass
+    elif old_is_sig not in source:
+        print(f"  {YELLOW}0002: cannot locate init_sched signature{NL}", file=sys.stderr)
+    else:
+        source = source.replace(old_is_sig, new_is_sig)
 
-    source = source.replace(old_sig, new_sig)
+        old_body = (
+            "\tstruct flow_data *fd = eq->elevator_data;\n"
+            "\n"
+            "\tif (!fd)\n"
+            "\t\treturn -ENOMEM;"
+        )
+        new_body = (
+            "\tstruct elevator_queue *eq;\n"
+            "\tstruct flow_data *fd;\n"
+            "\n"
+            "\teq = elevator_alloc(q, e);\n"
+            "\tif (!eq)\n"
+            "\t\treturn -ENOMEM;\n"
+            "\tfd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);\n"
+            "\tif (!fd) {\n"
+            "\t\tkobject_put(&eq->kobj);\n"
+            "\t\treturn -ENOMEM;\n"
+            "\t}\n"
+            "\teq->elevator_data = fd;"
+        )
 
-    # Replace the body: instead of using pre-allocated eq->elevator_data,
-    # allocate eq and fd ourselves.
-    old_body = (
-        "\tstruct flow_data *fd = eq->elevator_data;\n"
-        "\n"
-        "\tif (!fd)\n"
-        "\t\treturn -ENOMEM;"
-    )
-    new_body = (
-        "\tstruct elevator_queue *eq;\n"
-        "\tstruct flow_data *fd;\n"
-        "\n"
-        "\teq = elevator_alloc(q, e);\n"
-        "\tif (!eq)\n"
-        "\t\treturn -ENOMEM;\n"
-        "\tfd = kzalloc_node(sizeof(*fd), GFP_KERNEL, q->node);\n"
-        "\tif (!fd) {\n"
-        "\t\tkobject_put(&eq->kobj);\n"
-        "\t\treturn -ENOMEM;\n"
-        "\t}\n"
-        "\teq->elevator_data = fd;"
-    )
+        if old_body not in source:
+            print(f"  {YELLOW}0002: cannot locate init_sched body anchor{NL}",
+                  file=sys.stderr)
+        else:
+            source = source.replace(old_body, new_body)
+            transformed = True
 
-    if old_body not in source:
-        print(f"  {YELLOW}0002: cannot locate init_sched body anchor{NL}",
-              file=sys.stderr)
-        return source
+    # ── Transform 2: depth_updated ─────────────────────────────────────
+    old_du_sig = "static void flow_depth_updated(struct request_queue *q)"
+    new_du_sig = "static void flow_depth_updated(struct blk_mq_hw_ctx *hctx)"
 
-    source = source.replace(old_body, new_body)
+    if new_du_sig in source:
+        # already in depth_updated compat format — skip
+        pass
+    elif old_du_sig not in source:
+        print(f"  {YELLOW}0002: cannot locate depth_updated signature{NL}", file=sys.stderr)
+    else:
+        source = source.replace(old_du_sig, new_du_sig)
 
-    # In v4.0, flow_init_sched has no kmem_cache/mempool allocations that can
-    # fail after the initial NULL check, so no goto labels exist.  The compat
-    # body simply returns -ENOMEM on elevator_alloc or kzalloc failure — no
-    # teardown goto chain is needed.
+        old_du_body = (
+            "\tblk_mq_set_min_shallow_depth(q, q->async_depth);"
+        )
+        new_du_body = (
+            "\tblk_mq_set_min_shallow_depth(hctx->queue, hctx->queue->async_depth);"
+        )
+
+        if old_du_body not in source:
+            print(f"  {YELLOW}0002: cannot locate depth_updated body{NL}", file=sys.stderr)
+        else:
+            source = source.replace(old_du_body, new_du_body)
+            transformed = True
+
+    if not transformed:
+        return source  # return original unchanged
+
     return source
 
 

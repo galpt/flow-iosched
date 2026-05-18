@@ -1,27 +1,49 @@
 From: Galih Tama <galpt@v.recipes>
-Date: Mon May 18 07:04:48 2026 +0000
-Subject: [PATCH] flow-iosched: compat for 6.12-6.17 init_sched API
+Date: Mon May 18 07:13:31 2026 +0000
+Subject: [PATCH] flow-iosched: compat for 6.12-6.16 init_sched + depth_updated API
 
-    Kernels 6.12 through 6.17 use an older init_sched elevator
-    op signature:
+    Kernels 6.12 through 6.16 use two different elevator op
+    signatures compared with 6.18+ / 7.x:
     
-        int init_sched(struct request_queue *q, struct elevator_type *e)
+    init_sched:
+        6.18+ / 7.x:  int init_sched(q, struct elevator_queue *eq)
+        6.12-6.16:    int init_sched(q, struct elevator_type *e)
     
-    instead of the 6.18+ / 7.x signature:
+    In the older API the scheduler must call elevator_alloc(q, e)
+    and set elevator_data itself.  elevator_alloc on these kernels
+    takes 2 arguments (not 3).
     
-        int init_sched(struct request_queue *q, struct elevator_queue *eq)
+    depth_updated:
+        6.18+ / 7.x:  void depth_updated(struct request_queue *)
+        6.12-6.16:    void depth_updated(struct blk_mq_hw_ctx *)
     
-    This patch adjusts flow_init_sched() to match the older API by
-    allocating the elevator_queue and private data itself, and adding
-    kobject_put on the error path.
+    The older callback receives the hardware context and must
+    derive the queue from it.
+    
+    Kernel 6.17 has the same init_sched signature as 6.18+ but still
+    uses the older depth_updated(hctx).  No official compat patch is
+    provided for 6.17 — apply the depth_updated hunk manually if
+    needed.
 
     Signed-off-by: Galih Tama <galpt@v.recipes>
     ---
 
 diff --git a/block/flow-iosched.c b/block/flow-iosched.c
-index f51f28c988..aaef9be917 100644
+index f51f28c988..755b69b618 100644
 --- a/block/flow-iosched.c
 +++ b/block/flow-iosched.c
+@@ -586,9 +586,9 @@ static struct request *flow_next_request(struct request_queue *q,
+ 
+ /* ── Queue depth management ────────────────────────────────────── */
+ 
+-static void flow_depth_updated(struct request_queue *q)
++static void flow_depth_updated(struct blk_mq_hw_ctx *hctx)
+ {
+-	blk_mq_set_min_shallow_depth(q, q->async_depth);
++	blk_mq_set_min_shallow_depth(hctx->queue, hctx->queue->async_depth);
+ }
+ 
+ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 @@ -600,12 +600,20 @@ static void flow_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
  
  /* ── Init / exit ───────────────────────────────────────────────── */

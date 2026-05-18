@@ -162,8 +162,9 @@ that do not fit in the flowchart:
 | Kernel range | Notes |
 |---|---|
 | 7.0.x (CachyOS) | Default target — the v4.0 source targets this API. |
-| 6.18 – 6.19 | Same init_sched API as 7.x — compatible as-is. |
-| 6.12 – 6.17 | Older init_sched + depth_updated signatures — apply patches/0002-linux6.12-flow-iosched-compat.patch on top of 0001. Regenerate both with `./bench-tests/generate-patches.py`. |
+| 6.18 – 6.19 | Same init_sched and depth_updated signatures as 7.x — compatible as-is. |
+| 6.17 | Same init_sched as 7.x but older `depth_updated(struct blk_mq_hw_ctx *)` signature. The 0002 compat patch covers this, or apply the depth_updated hunk from `generate-patches.py` directly. |
+| 6.12 – 6.16 | Older `init_sched(q, struct elevator_type *)` and `depth_updated(hctx)` signatures. Apply `patches/0002-linux6.12-flow-iosched-compat.patch` on top of 0001. Regenerate both with `./bench-tests/generate-patches.py`. |
 | 5.18 – 6.11 | `scoped_guard` macros exist (cleanup.h added in 5.18) but the `limit_depth` and `insert_requests` elevator op signatures differ from the 6.12+ API. **Untested.** |
 
 > [!IMPORTANT]
